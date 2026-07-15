@@ -46,7 +46,19 @@ x-headroom-common: &headroom-common
     HEADROOM_OUTPUT_SHAPER: "1"
     HEADROOM_OUTPUT_HOLDOUT: "0.1"
     HEADROOM_EMBEDDER_RUNTIME: pytorch_mps
-    HEADROOM_HOST: 0.0.0.0
+    # Treat the container gateway as loopback-equivalent so the local dashboard
+    # (browsed from the host at http://127.0.0.1:8787) sees the per-request
+    # "Recent Requests" table + config block. The host browser's peer IP is the
+    # gateway, not 127.0.0.1, so _request_is_loopback would otherwise strip that
+    # sensitive block. The loopback Host-header gate still applies (DNS-rebinding
+    # defence intact).
+    # Scope tightly to the single container gateway the host browser is NAT'd
+    # through — the peer is always the gateway, never an arbitrary subnet host,
+    # so a /32 is the minimal grant. This host runs Apple Containerization /
+    # mocker (vmnet gateway 192.168.64.1). Docker/podman users would instead use
+    # their bridge gateway (e.g. 172.17.0.1/32); do NOT widen to 172.16.0.0/12.
+    HEADROOM_PROXY_TRUSTED_GATEWAY_CIDRS: "192.168.64.1/32"
+    HEADROOM_HOST: 0.0.0.0      
     HOME: /home/nonroot
     # Keep all Headroom read/write state on the named volume below.
     HEADROOM_WORKSPACE_DIR: /home/nonroot/.headroom
