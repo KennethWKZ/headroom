@@ -29,7 +29,7 @@
 # service produces (and reuses) the identical `headroom-proxy:local` tag.
 x-headroom-common: &headroom-common
   image: headroom-proxy:local
-  restart: unless-stopped
+  restart: on-failure:2
   build:
     context: .
     args:
@@ -46,6 +46,21 @@ x-headroom-common: &headroom-common
     HEADROOM_OUTPUT_SHAPER: "1"
     HEADROOM_OUTPUT_HOLDOUT: "0.1"
     HEADROOM_EMBEDDER_RUNTIME: pytorch_mps
+    # Treat the container gateway as loopback-equivalent so the local dashboard
+    # (browsed from the host at http://127.0.0.1:8787) sees the per-request
+    # "Recent Requests" table + config block. The host browser's peer IP is the
+    # gateway, not 127.0.0.1, so _request_is_loopback would otherwise strip that
+    # sensitive block. The loopback Host-header gate still applies (DNS-rebinding
+    # defence intact).
+    # Scope tightly to the single host peer the host browser is NAT'd through
+    # — a /32 is the minimal grant. This host runs rootless podman with pasta,
+    # whose port-forwarder presents itself inside the container as
+    # 192.168.127.1 (NOT the bridge gateway 10.89.0.1 — pasta uses a separate
+    # 192.168.127.0/24 for host-loopback mapping; verify by running a published
+    # echo server and reading REMOTE_ADDR). Docker bridge users use 172.17.0.1/32;
+    # mocker/Apple Containerization used 192.168.64.1/32. Do NOT widen to
+    # 10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16.
+    HEADROOM_PROXY_TRUSTED_GATEWAY_CIDRS: "192.168.127.1/32"
     HEADROOM_HOST: 0.0.0.0
     HOME: /home/nonroot
     # Keep all Headroom read/write state on the named volume below.
