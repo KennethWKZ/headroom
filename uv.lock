@@ -1690,12 +1690,15 @@ agno = [
 ]
 all = [
     { name = "anthropic" },
+    { name = "boto3" },
+    { name = "botocore", extra = ["crt"] },
     { name = "datasets" },
     { name = "fastapi" },
     { name = "fastembed" },
     { name = "httpx", extra = ["http2"] },
     { name = "huggingface-hub" },
     { name = "jinja2" },
+    { name = "lm-eval", extra = ["api"] },
     { name = "magika" },
     { name = "mcp" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version < '3.11'" },

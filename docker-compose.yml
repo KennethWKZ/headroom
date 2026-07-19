@@ -19,45 +19,116 @@
 #   7474  Neo4j Browser 7687  Neo4j Bolt
 # =============================================================================
 
+
+# Single shared headroom-proxy image is built once and reused by every proxy
+# service below. All extras (proxy, code, bedrock) are baked in so the plain,
+# extras baked in: proxy, code, bedrock, pytorch-mps, image (pillow/SigLIP/OCR),
+# html (trafilatura). GLM, DeepSeek and Bedrock variants run off the same image
+# — only runtime
+# env / ports / command differ. Build is declared in the anchor so every
+# service produces (and reuses) the identical `headroom-proxy:local` tag.
+x-headroom-common: &headroom-common
+  image: headroom-proxy:local
+  restart: unless-stopped
+  build:
+    context: .
+    args:
+      # boto3 + botocore[crt] for the bedrock backend / aws login provider.
+      # Bundled for all variants so one image serves every backend.
+      HEADROOM_EXTRAS: proxy,code,bedrock,pytorch-mps
+      HEADROOM_BUILD_VERSION: ${HEADROOM_BUILD_VERSION:-source-build}
+  # Run as root so the rootless-podman VM maps the process to the host file
+  # owner; otherwise the image's nonroot (uid 1000) user cannot write the
+  # mounted ~/.headroom (owned by the host user) — savings/memory/cache fail.
+  user: "0:0"
+  command: ["--memory", "--code-graph", "--no-rate-limit", "--no-telemetry"]
+  environment: &headroom-env
+    HEADROOM_OUTPUT_SHAPER: "1"
+    HEADROOM_OUTPUT_HOLDOUT: "0.1"
+    HEADROOM_EMBEDDER_RUNTIME: pytorch_mps
+    HEADROOM_HOST: 0.0.0.0
+    HOME: /home/nonroot
+    # Keep all Headroom read/write state on the named volume below.
+    HEADROOM_WORKSPACE_DIR: /home/nonroot/.headroom
+    HEADROOM_CONFIG_DIR: /home/nonroot/.headroom/config
+    # if you want to use a custom OpenAI-compatible API endpoint,
+    # uncomment and set the following line with the desired URL
+    # - OPENAI_TARGET_API_URL=https://api.x.ai
+  volumes:
+    # - headroom_workspace:/home/nonroot/.headroom
+    - ${HOME}/.headroom:/home/nonroot/.headroom
+  # Readiness probe: the orchestrator polls /readyz so dependents and
+  # `docker compose up --wait` only see the proxy as healthy once it's serving.
+  healthcheck:
+    test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8787/readyz"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 20s
+  # Start the datastores first. Note: this waits for the containers to start,
+  # not for them to be fully ready — the proxy retries its connections, so a
+  # brief "database not ready yet" window on first boot is expected.
+  depends_on:
+    - qdrant
+    - neo4j
+
 services:
   # Headroom proxy — the OpenAI-compatible endpoint your client talks to.
   # Built from the repo Dockerfile so it tracks your local checkout.
   headroom-proxy:
-    build:
-      context: .
-      args:
-        HEADROOM_BUILD_VERSION: ${HEADROOM_BUILD_VERSION:-source-build}
-    # Bind to all interfaces inside the container so the published port is reachable.
-    command: ["--host", "0.0.0.0"]
-    environment:
-      - HEADROOM_HOST=0.0.0.0
-      - HOME=/home/nonroot
-      # Keep all Headroom read/write state on the named volume below.
-      - HEADROOM_WORKSPACE_DIR=/home/nonroot/.headroom
-      - HEADROOM_CONFIG_DIR=/home/nonroot/.headroom/config
-      # if you want to use a custom OpenAI-compatible API endpoint,
-      # uncomment and set the following line with the desired URL
-      # - OPENAI_TARGET_API_URL=https://api.x.ai
-      # CLI-filtering dashboard figures require the `rtk` binary inside this
-      # container; it is not installed by this image. See docs/content/docs/docker-install.mdx.
+    <<: *headroom-common
     ports:
       - "8787:8787"
+    # if you want to use a custom OpenAI-compatible API endpoint,
+    # uncomment and set the following line with the desired URL
+    # environment:
+    #   <<: *headroom-env
+    #   OPENAI_TARGET_API_URL: https://api.x.ai
+
+  headroom-proxy-glm:
+    <<: *headroom-common
+    environment:
+      <<: *headroom-env
+      ANTHROPIC_TARGET_API_URL: https://api.z.ai/api/anthropic
+    ports:
+      - "8789:8787"
+
+  headroom-proxy-deepseek:
+    <<: *headroom-common
+    environment:
+      <<: *headroom-env
+      ANTHROPIC_TARGET_API_URL: https://api.deepseek.com/anthropic
+    ports:
+      - "8790:8787"
+
+  headroom-proxy-bedrock:
+    <<: *headroom-common
+    command:
+      - "--memory"
+      - "--code-graph"
+      - "--no-rate-limit"
+      - "--no-telemetry"
+      - "--backend"
+      - "bedrock"
+      - "--bedrock-profile"
+      - "${AWS_PROFILE:-default}"
+    environment:
+      <<: *headroom-env
+      HEADROOM_BACKEND: bedrock
+      HEADROOM_REGION: ${AWS_REGION:-ap-southeast-1}
+      AWS_REGION: ${AWS_REGION:-ap-southeast-1}
+      AWS_PROFILE: ${AWS_PROFILE:-default}
+      # user:"0:0" defaults HOME=/root, but ~/.aws is mounted at
+      # /home/nonroot/.aws. The `aws login` credential provider resolves its
+      # token cache under $HOME/.aws/login — so HOME must point at the mount
+      # root, not /root. This covers both ~/.aws/config and the login cache.
+    ports:
+      - "8788:8787"
     volumes:
-      - headroom_workspace:/home/nonroot/.headroom
-    # Readiness probe: the orchestrator polls /readyz so dependents and
-    # `docker compose up --wait` only see the proxy as healthy once it's serving.
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8787/readyz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-    # Start the datastores first. Note: this waits for the containers to start,
-    # not for them to be fully ready — the proxy retries its connections, so a
-    # brief "database not ready yet" window on first boot is expected.
-    depends_on:
-      - qdrant
-      - neo4j
+      - ${HOME}/.headroom:/home/nonroot/.headroom
+      # aws login credentials (OAuth refresh token + temp creds cache); host
+      # awsAuthRefresh keeps the token alive, container reads it via botocore.
+      - ${HOME}/.aws:/home/nonroot/.aws
 
   # Vector database for semantic search.
   # Stores embeddings so the proxy can retrieve semantically similar context.
