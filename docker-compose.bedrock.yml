@@ -57,8 +57,14 @@ services:
       - AWS_REGION=${AWS_REGION}
       - AWS_PROFILE=${AWS_PROFILE:-default}
       - HOME=/home/nonroot
+      # Trust ONLY the single container gateway the host browser is NAT'd
+      # through (mocker vmnet gateway 192.168.64.1) so the dashboard's
+      # per-request table renders. /32 = minimal grant; the loopback
+      # Host-header gate is still enforced as the DNS-rebinding defence.
+      - HEADROOM_PROXY_TRUSTED_GATEWAY_CIDRS=192.168.64.1/32
     ports:
-      - "${HEADROOM_BEDROCK_PORT:-8789}:8787"
+      # Loopback-only (mocker >=0.7.0 honors [host-ip:] prefix, PR #57).
+      - "127.0.0.1:${HEADROOM_BEDROCK_PORT:-8789}:8787"
     volumes:
       - headroom_workspace:/home/nonroot/.headroom
       # Host AWS credentials (read-only mount; the SSO/login cache is refreshed
