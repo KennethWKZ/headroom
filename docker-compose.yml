@@ -107,6 +107,16 @@ services:
   # Built from the repo Dockerfile so it tracks your local checkout.
   headroom-proxy:
     <<: *headroom-common
+    # Embedding + code-graph work is memory-hungry; the runtime default (1 GiB)
+    # is too tight. Set here rather than in x-headroom-common so the other proxy
+    # variants keep the default — under Apple Containerization / mocker this is a
+    # per-container VM RAM allocation held for the container's lifetime, so
+    # putting it in the anchor would reserve 6 GiB x 4 services.
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+          cpus: "4"
     ports:
       - "8787:8787"
     # if you want to use a custom OpenAI-compatible API endpoint,
