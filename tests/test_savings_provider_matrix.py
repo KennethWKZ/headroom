@@ -262,3 +262,27 @@ def test_long_context_tier_threshold_is_read_per_model():
     # 1K tokens at $0.10/M below the threshold, at $0.50/M above it.
     assert _saved(90_000)["compression_list"] == pytest.approx(1_000 * 1e-7)
     assert _saved(150_000)["compression_list"] == pytest.approx(1_000 * 5e-7)
+
+
+def test_compression_that_crosses_the_tier_credits_the_whole_premium():
+    """110K compressed to 90K on Haiku 5.5 avoids the 5x card on every token.
+
+    Uncompressed: 110K x $0.50/M = $0.055. Forwarded: 90K x $0.10/M = $0.009.
+    The saving is $0.046, not the removed 20K at the base rate ($0.002).
+    """
+    import litellm
+
+    if "input_cost_per_token_above_100k_tokens" not in litellm.model_cost.get(
+        "claude-haiku-5-5", {}
+    ):
+        pytest.skip("installed LiteLLM catalog predates Claude Haiku 5.5")
+
+    saved = estimate_request_savings_usd(
+        model="claude-haiku-5-5",
+        compression_tokens_saved=20_000,
+        uncached_input_tokens=90_000,
+        provider="anthropic",
+    )
+    assert saved["compression"] == pytest.approx(0.055 - 0.009)
+    # The list companion prices only the removed tokens, at the long card.
+    assert saved["compression_list"] == pytest.approx(20_000 * 5e-7)
