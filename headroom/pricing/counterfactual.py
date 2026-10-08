@@ -635,46 +635,6 @@ def long_context_premium_avoided_usd(
     return input_premium + output_premium
 
 
-def long_context_premium_avoided_usd(
-    model: str,
-    mix: CacheMix,
-    *,
-    local_tokens: int = 0,
-    provider: str | None = None,
-) -> float:
-    """Long-context premium a request's forwarded input avoided, in USD.
-
-    For a request whose uncompressed prompt would have passed ``model``'s
-    long-context threshold but whose forwarded prompt did not: the provider
-    re-prices the WHOLE request above the threshold, so compression saved the
-    long card on every forwarded input token, on top of the removed tokens
-    themselves. This is that difference, forwarded input at the long card minus
-    the same input at the base card. Output is not included; a caller that
-    knows the completion tokens adds their premium itself.
-
-    ``local_tokens`` stands in as uncached input when the provider reported no
-    breakdown. Returns 0.0 for a model with no tier or no catalog row.
-    """
-    try:
-        long_rates = resolve_rates(model, long_context=True, provider=provider)
-        base_rates = resolve_rates(model, long_context=False, provider=provider)
-    except Exception:  # pragma: no cover - defensive; pricing must never raise
-        return 0.0
-    if long_rates is None or base_rates is None:
-        return 0.0
-    if mix.has_signal():
-        n = mix.normalized()
-        split = TokenSplit(
-            read=float(n.read),
-            write_5m=float(n.write_5m),
-            write_1h=float(n.write_1h),
-            uncached=float(n.uncached),
-        )
-    else:
-        split = TokenSplit(uncached=float(max(_coerce_int(local_tokens), 0)))
-    return max(0.0, long_rates.price(split) - base_rates.price(split))
-
-
 @dataclass(frozen=True)
 class PricedSavings:
     """What a set of counterfactual tokens was worth, and how sure we are.

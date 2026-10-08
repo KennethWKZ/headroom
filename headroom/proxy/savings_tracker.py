@@ -491,6 +491,7 @@ def estimate_request_savings_usd(
     compression_tokens_saved: int = 0,
     tool_schema_tokens_saved: int = 0,
     output_tokens_saved: int = 0,
+    output_tokens: int = 0,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
     cache_write_5m_tokens: int = 0,
@@ -554,7 +555,7 @@ def estimate_request_savings_usd(
     long_context = mix.is_long_context(local_tokens=local_input_tokens, threshold=threshold)
     # Compression that kept the prompt under the threshold avoided the long
     # card on the whole request: the removed tokens are priced at that card,
-    # and the forwarded input's premium is added on top.
+    # and the forwarded input and generated output premiums are added on top.
     forwarded = max(mix.billed, max(_coerce_int(local_input_tokens), 0))
     crossed = (
         not long_context and forwarded + max(_coerce_int(compression_tokens_saved), 0) > threshold
@@ -580,7 +581,11 @@ def estimate_request_savings_usd(
     compression_usd = compression.usd
     if crossed:
         compression_usd += long_context_premium_avoided_usd(
-            model, mix, local_tokens=local_input_tokens, provider=provider
+            model,
+            mix,
+            local_tokens=local_input_tokens,
+            output_tokens=output_tokens,
+            provider=provider,
         )
 
     return {
@@ -1420,6 +1425,7 @@ class SavingsTracker:
             priced = estimate_request_savings_usd(
                 model,
                 compression_tokens_saved=_coerce_int(metrics.get("tokens_saved")),
+                output_tokens=_coerce_int(metrics.get("output_tokens")),
                 cache_read_tokens=cache_read_tokens,
                 cache_write_tokens=cache_write_tokens,
                 cache_write_5m_tokens=_coerce_int(metrics.get("cache_write_5m_tokens")),
