@@ -679,7 +679,13 @@ impl Ledger {
                             .saturating_add(ev.usage.cache_write_tokens),
                     );
                     EventUsd {
-                        compression: p.compression_savings_usd(ev.tokens_saved()),
+                        compression: card.compression_savings_usd(
+                            uncached,
+                            ev.usage.cache_read_tokens,
+                            ev.usage.cache_write_tokens,
+                            ev.usage.output_tokens,
+                            ev.tokens_saved(),
+                        ),
                         cache: p.cache_savings_usd(
                             ev.usage.cache_read_tokens,
                             ev.usage.cache_write_tokens,
@@ -1309,6 +1315,26 @@ mod tests {
         let output = v["session"]["output_cost_usd"].as_f64().unwrap();
         assert!((input - 0.075).abs() < 1e-9, "input: {input}");
         assert!((output - 0.0125).abs() < 1e-9, "output: {output}");
+    }
+
+    /// Devin's example on #4037: 110K uncached compressed to 90K saves
+    /// $0.055 - $0.009 = $0.046 of input, not 20K x $0.10/M = $0.002.
+    #[test]
+    fn compression_below_the_threshold_credits_the_avoided_long_card() {
+        let ledger = Ledger::in_memory();
+        let mut ev = event("claude-haiku-5-5");
+        ev.tokens_before = 110_000;
+        ev.tokens_after = 90_000;
+        ev.usage = Usage {
+            input_tokens: 90_000,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        };
+        ledger.record(ev);
+        let v = ledger.stats_payload(true);
+        let saved = v["session"]["compression_savings_usd"].as_f64().unwrap();
+        assert!((saved - 0.046).abs() < 1e-9, "saved: {saved}");
     }
 
     /// Cache reads count toward the threshold: 60K uncached + 60K
