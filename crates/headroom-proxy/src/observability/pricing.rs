@@ -288,6 +288,20 @@ mod tests {
         assert!(p.cache_write > p.input, "cache writes carry a premium");
     }
 
+    #[test]
+    fn claude_haiku_5_5_uses_the_base_rate_card() {
+        // The book holds the flat <=100K-prompt card; the `*_above_100k_tokens`
+        // tier fields are not read here.
+        let p = lookup("claude-haiku-5-5").expect("priced");
+        assert!((p.input - 1e-7).abs() < 1e-15, "input $0.10/MTok");
+        assert!((p.output - 5e-7).abs() < 1e-15, "output $0.50/MTok");
+        assert!((p.cache_read - 1e-8).abs() < 1e-15, "cache read $0.01/MTok");
+        assert!(
+            (p.cache_write - 1.25e-7).abs() < 1e-15,
+            "5m cache write $0.125/MTok"
+        );
+    }
+
     /// Bedrock cross-region pricing is region-specific, so an exact
     /// regional entry must win over the geo-stripped base id.
     #[test]
