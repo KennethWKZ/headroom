@@ -15,6 +15,7 @@ from collections import deque
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from headroom.cache_economics import CACHE_ECONOMICS as _CACHE_ECONOMICS
 from headroom.proxy.budget_basis_policy import (
     BUDGET_BASIS_BLOCK,
     BUDGET_BASIS_IGNORE,
@@ -109,28 +110,6 @@ class CostEntry(NamedTuple):
 # source for cache economics, and these ratios stand in when a model publishes
 # no cache pricing. Hardcoded ratios go stale per model and per context tier
 # (Anthropic's >200k rates differ), so they are never preferred over the catalog.
-_CACHE_ECONOMICS = {
-    "anthropic": {
-        "read_multiplier": 0.1,
-        "write_multiplier": 1.25,
-        "label": "Explicit breakpoints, 5-min TTL",
-    },
-    "openai": {
-        "read_multiplier": 0.5,
-        "write_multiplier": 1.0,
-        "label": "Automatic, no TTL control",
-    },
-    "gemini": {
-        "read_multiplier": 0.1,
-        "write_multiplier": 1.0,
-        "label": "Explicit cachedContent, configurable TTL",
-    },
-    "bedrock": {
-        "read_multiplier": 0.1,
-        "write_multiplier": 1.25,
-        "label": "Same as Anthropic (Bedrock)",
-    },
-}
 
 
 def _long_context_threshold(model: str) -> int:
@@ -296,6 +275,7 @@ def build_prefix_cache_stats(
                     (provider in ("anthropic", "vertex:anthropic") and "claude" in model_name)
                     or (provider == "openai" and any(p in model_name for p in _openai_prefixes))
                     or (provider == "gemini" and "gemini" in model_name)
+                    or (provider == "xai" and "grok" in model_name)
                     or (provider == "bedrock" and "claude" in model_name)
                 )
                 if is_match and tokens_sent > best_tokens:
