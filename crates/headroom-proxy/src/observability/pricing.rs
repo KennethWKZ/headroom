@@ -157,6 +157,43 @@ impl PriceCard {
             _ => self.base,
         }
     }
+
+    /// USD compression saved on one request: what it would have cost
+    /// uncompressed minus what it did cost.
+    ///
+    /// Inside one tier that is the removed tokens at that tier's input
+    /// rate. When the uncompressed prompt would have passed the
+    /// long-context threshold and the forwarded one does not, the
+    /// provider would have re-priced the WHOLE request — every input
+    /// bucket and the output — at the long card, so the saving is the
+    /// difference of the two full bills, not the removed tokens at the
+    /// cheap rate.
+    pub fn compression_savings_usd(
+        &self,
+        uncached_input_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+        output_tokens: u64,
+        tokens_saved: u64,
+    ) -> f64 {
+        let prompt = uncached_input_tokens
+            .saturating_add(cache_read_tokens)
+            .saturating_add(cache_write_tokens);
+        let sent = self.for_prompt(prompt);
+        let unsent = self.for_prompt(prompt.saturating_add(tokens_saved));
+        if unsent == sent {
+            return sent.compression_savings_usd(tokens_saved);
+        }
+        let without = unsent.input_cost_usd(
+            uncached_input_tokens.saturating_add(tokens_saved),
+            cache_read_tokens,
+            cache_write_tokens,
+        ) + unsent.output_cost_usd(output_tokens);
+        let with =
+            sent.input_cost_usd(uncached_input_tokens, cache_read_tokens, cache_write_tokens)
+                + sent.output_cost_usd(output_tokens);
+        (without - with).max(0.0)
+    }
 }
 
 static BOOK: OnceLock<HashMap<String, PriceCard>> = OnceLock::new();
@@ -405,6 +442,22 @@ mod tests {
         assert_eq!(tier.above_tokens, 200_000);
         assert_eq!(card.for_prompt(150_000), card.base);
         assert!((card.for_prompt(200_001).input - 6e-6).abs() < 1e-15);
+    }
+
+    /// Compression that keeps a prompt under the threshold saves the
+    /// long card on the whole request, not just the removed tokens at
+    /// the base rate: 110K -> 90K uncached on Haiku 5.5, 1K output, is
+    /// (110K x $0.50 + 1K x $2.50) - (90K x $0.10 + 1K x $0.50) per MTok.
+    #[test]
+    fn compression_across_the_threshold_saves_the_whole_premium() {
+        let card = lookup_card("claude-haiku-5-5").expect("priced");
+        let usd = card.compression_savings_usd(90_000, 0, 0, 1_000, 20_000);
+        assert!((usd - (0.0575 - 0.0095)).abs() < 1e-9, "usd: {usd}");
+        // Inside one tier it stays removed tokens at that tier's rate.
+        let below = card.compression_savings_usd(50_000, 0, 0, 1_000, 20_000);
+        assert!((below - 20_000.0 * 1e-7).abs() < 1e-12, "below: {below}");
+        let above = card.compression_savings_usd(120_000, 0, 0, 1_000, 20_000);
+        assert!((above - 20_000.0 * 5e-7).abs() < 1e-12, "above: {above}");
     }
 
     /// A model without a published tier bills the base card at any size.
