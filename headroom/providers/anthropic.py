@@ -129,6 +129,8 @@ ANTHROPIC_CONTEXT_LIMITS: dict[str, int] = {
     "claude-sonnet-4-6": 1000000,
     # Claude Sonnet 4.5
     "claude-sonnet-4-5": 200000,
+    # Claude Haiku 5.5 - 1M context
+    "claude-haiku-5-5": 1000000,
     # Claude 4 (Sonnet 4, Haiku 4)
     "claude-sonnet-4-20250514": 200000,
     "claude-haiku-4-5-20251001": 200000,
@@ -180,6 +182,9 @@ ANTHROPIC_PRICING: dict[str, dict[str, float]] = {
     # Claude Sonnet 4.6 / 4.5: $3 in / $15 out, cache read $0.30
     "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "cached_input": 0.30},
     "claude-sonnet-4-5": {"input": 3.00, "output": 15.00, "cached_input": 0.30},
+    # Claude Haiku 5.5: $0.10 in / $0.50 out, cache read $0.01, for prompts up
+    # to 100K tokens; longer prompts use a 5x rate card (`_LONG_CONTEXT_TIERS`).
+    "claude-haiku-5-5": {"input": 0.10, "output": 0.50, "cached_input": 0.01},
     # Claude 4 (Sonnet/Haiku tier pricing)
     "claude-sonnet-4-20250514": {"input": 3.00, "output": 15.00, "cached_input": 0.30},
     "claude-haiku-4-5-20251001": {"input": 1.00, "output": 5.00, "cached_input": 0.10},
@@ -201,16 +206,32 @@ ANTHROPIC_PRICING: dict[str, dict[str, float]] = {
 # derived from LiteLLM's `*_above_200k_tokens` fields ($3->$6 in, $15->$22.50
 # out, $0.30->$0.60 cache read).
 #
-# Only the Sonnet 4 / 4.5 family is tiered: Opus, and Sonnet 4.6 onward, are
-# flat-rated across their whole window. This is the same population that needs
-# the `[1m]` suffix to reach 1M at all, so a session that fills the window this
-# unlocks is billed at these rates.
+# Among the 200K-threshold models only the Sonnet 4 / 4.5 family is tiered:
+# Opus, and Sonnet 4.6 onward, are flat-rated across their whole window. This
+# is the same population that needs the `[1m]` suffix to reach 1M at all, so a
+# session that fills the window this unlocks is billed at these rates.
 _LONG_CONTEXT_THRESHOLD = 200_000
 _LONG_CONTEXT_PREMIUM: dict[str, float] = {"input": 2.0, "output": 1.5, "cached_input": 2.0}
 _LONG_CONTEXT_TIERED_MODELS = (
     "claude-sonnet-4-5",
     "claude-sonnet-4-20250514",
     "claude-4-sonnet-20250514",
+)
+
+# Claude Haiku 5.5 has its own rate card for prompts above 100K tokens: every
+# rate is 5x (LiteLLM's `*_above_100k_tokens` fields: $0.10->$0.50 in,
+# $0.50->$2.50 out, $0.01->$0.05 cache read).
+_HAIKU_5_5_LONG_PROMPT_THRESHOLD = 100_000
+_HAIKU_5_5_LONG_PROMPT_PREMIUM: dict[str, float] = {
+    "input": 5.0,
+    "output": 5.0,
+    "cached_input": 5.0,
+}
+
+# (model prefixes, prompt-token threshold, per-rate multipliers above it)
+_LONG_CONTEXT_TIERS: tuple[tuple[tuple[str, ...], int, dict[str, float]], ...] = (
+    (_LONG_CONTEXT_TIERED_MODELS, _LONG_CONTEXT_THRESHOLD, _LONG_CONTEXT_PREMIUM),
+    (("claude-haiku-5-5",), _HAIKU_5_5_LONG_PROMPT_THRESHOLD, _HAIKU_5_5_LONG_PROMPT_PREMIUM),
 )
 
 
@@ -222,11 +243,12 @@ def _apply_long_context_premium(
     Used only on the manual fallback path; the LiteLLM path already applies the
     published above-threshold rates itself.
     """
-    if input_tokens <= _LONG_CONTEXT_THRESHOLD:
-        return pricing
-    if not any(model.startswith(tiered) for tiered in _LONG_CONTEXT_TIERED_MODELS):
-        return pricing
-    return {key: rate * _LONG_CONTEXT_PREMIUM.get(key, 1.0) for key, rate in pricing.items()}
+    for prefixes, threshold, premium in _LONG_CONTEXT_TIERS:
+        if model.startswith(prefixes):
+            if input_tokens <= threshold:
+                return pricing
+            return {key: rate * premium.get(key, 1.0) for key, rate in pricing.items()}
+    return pricing
 
 
 # Default limits for pattern-based inference
@@ -829,8 +851,8 @@ class AnthropicProvider(Provider):
 
         Tries LiteLLM first for up-to-date pricing, falls back to manual pricing.
         Both paths apply Anthropic's long-context premium: on the Sonnet 4 / 4.5
-        family a prompt over 200K re-prices the whole request (see
-        ``_LONG_CONTEXT_PREMIUM``).
+        family a prompt over 200K, and on Haiku 5.5 a prompt over 100K,
+        re-prices the whole request (see ``_LONG_CONTEXT_TIERS``).
 
         ``now`` selects a DeepSeek peak/off-peak tier (see
         :mod:`headroom.pricing.deepseek_tiers`); ``None`` reads the wall clock.
