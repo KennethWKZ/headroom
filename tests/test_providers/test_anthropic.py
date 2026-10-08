@@ -180,6 +180,76 @@ class TestLongContextPricing:
         cost = manual_provider.estimate_cost(300_000, 5_000, "claude-sonnet-4-5[1m]", 0)
         assert cost == pytest.approx(1.9125, rel=1e-4)
 
+    # Haiku 5.5's tier starts at 100K and multiplies every rate by 5:
+    # 100K in / 5K out  -> 100K*$0.10 + 5K*$0.50  = $0.0125
+    # 150K in / 5K out  -> 150K*$0.50 + 5K*$2.50  = $0.0875  (long-prompt card)
+    # 150K in of which 100K cached, 5K out
+    #                   -> 50K*$0.50 + 100K*$0.05 + 5K*$2.50 = $0.0425
+    @pytest.mark.parametrize(
+        ("input_tokens", "output_tokens", "cached_tokens", "expected"),
+        [
+            (100_000, 5_000, 0, 0.0125),
+            (150_000, 5_000, 0, 0.0875),
+            (150_000, 5_000, 100_000, 0.0425),
+        ],
+    )
+    def test_haiku_5_5_long_prompt_card_starts_at_100k(
+        self, manual_provider, input_tokens, output_tokens, cached_tokens, expected
+    ):
+        cost = manual_provider.estimate_cost(
+            input_tokens, output_tokens, "claude-haiku-5-5", cached_tokens
+        )
+        assert cost == pytest.approx(expected, rel=1e-4)
+
+    def test_haiku_5_5_card_survives_litellm_dropping_the_100k_rate(self, provider, monkeypatch):
+        """A Haiku 5.5 entry without the above-100K rate must not bill a long prompt at the base tier."""
+        litellm = pytest.importorskip("litellm")
+        import headroom.providers.anthropic as anthropic_module
+
+        # Keeps the 200K field Sonnet's tier reads, so only Haiku's own field decides.
+        monkeypatch.setitem(
+            litellm.model_cost,
+            "claude-haiku-5-5",
+            {
+                "litellm_provider": "anthropic",
+                "mode": "chat",
+                "input_cost_per_token": 1e-07,
+                "output_cost_per_token": 5e-07,
+                "cache_read_input_token_cost": 1e-08,
+                "input_cost_per_token_above_200k_tokens": 5e-07,
+            },
+        )
+
+        assert provider.estimate_cost(150_000, 5_000, "claude-haiku-5-5", 0) == pytest.approx(
+            0.0875, rel=1e-4
+        )
+        # At the threshold the LiteLLM path still prices it.
+        assert (
+            anthropic_module._litellm_lacks_long_context_rate("claude-haiku-5-5", 100_000) is False
+        )
+
+    def test_haiku_5_5_published_100k_rate_stays_on_litellm(self, monkeypatch):
+        """With its own above-100K rate published, LiteLLM keeps pricing a long Haiku prompt."""
+        litellm = pytest.importorskip("litellm")
+        import headroom.providers.anthropic as anthropic_module
+
+        monkeypatch.setitem(
+            litellm.model_cost,
+            "claude-haiku-5-5",
+            {
+                "litellm_provider": "anthropic",
+                "mode": "chat",
+                "input_cost_per_token": 1e-07,
+                "output_cost_per_token": 5e-07,
+                "input_cost_per_token_above_100k_tokens": 5e-07,
+                "output_cost_per_token_above_100k_tokens": 2.5e-06,
+            },
+        )
+
+        assert (
+            anthropic_module._litellm_lacks_long_context_rate("claude-haiku-5-5", 150_000) is False
+        )
+
 
 class TestLiteLLMCostHelper:
     """The shared helper each provider now uses for LiteLLM-backed pricing.
@@ -324,8 +394,10 @@ class TestAnthropicCostEstimation:
             ("claude-opus-5-5", {"input": 4.00, "output": 20.00, "cached_input": 0.20}),
             ("claude-opus-5", {"input": 5.00, "output": 25.00, "cached_input": 0.50}),
             ("claude-sonnet-5-5", {"input": 2.00, "output": 10.00, "cached_input": 0.20}),
+            ("claude-haiku-5-5", {"input": 0.10, "output": 0.50, "cached_input": 0.01}),
             # Suffixed ids must resolve to their own row, not a shorter prefix's.
             ("claude-sonnet-5-5[1m]", {"input": 2.00, "output": 10.00, "cached_input": 0.20}),
+            ("claude-haiku-5-5-20261001", {"input": 0.10, "output": 0.50, "cached_input": 0.01}),
             ("claude-fable-5-1-20261001", {"input": 10.00, "output": 50.00, "cached_input": 0.25}),
             ("claude-opus-5-5-20261001", {"input": 4.00, "output": 20.00, "cached_input": 0.20}),
         ],
@@ -334,7 +406,14 @@ class TestAnthropicCostEstimation:
         assert anthropic_provider._get_pricing(model) == expected
 
     @pytest.mark.parametrize(
-        "model", ["claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"]
+        "model",
+        [
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-opus-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+        ],
     )
     def test_context_limit_claude_5_point_releases(self, anthropic_provider, model):
         assert anthropic_provider.get_context_limit(model) == 1_000_000

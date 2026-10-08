@@ -68,7 +68,9 @@ logger = logging.getLogger(__name__)
 
 #: Context size at which the major catalogs publish a second, higher price tier
 #: (LiteLLM spells it ``*_above_200k_tokens``). A request's billed prompt is
-#: compared against this to pick which rate applies.
+#: compared against this to pick which rate applies. Claude Haiku 5.5's tier
+#: starts at 100K instead (``*_above_100k_tokens``) and is not read here, so its
+#: prompts above 100K are priced at the base rate card.
 LONG_CONTEXT_THRESHOLD_TOKENS = 200_000
 
 #: Provider-level cache discount ratios, as a fraction of the base input price.
