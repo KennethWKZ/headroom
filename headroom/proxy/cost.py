@@ -112,10 +112,21 @@ class CostEntry(NamedTuple):
 # (Anthropic's >200k rates differ), so they are never preferred over the catalog.
 
 
-#: Context size at which the major catalogs publish a second, higher price
-#: tier (LiteLLM spells it ``*_above_200k_tokens``). A request's billed prompt
-#: is compared against this to pick which rate applies.
-_LONG_CONTEXT_THRESHOLD_TOKENS = 200_000
+def _long_context_threshold(model: str) -> int:
+    """Billed-prompt size above which ``model`` pays its long-context rates.
+
+    Delegates to :func:`headroom.pricing.counterfactual.long_context_threshold`,
+    which reads the model's own tier from the catalog (Haiku 5.5: 100K, Sonnet
+    4.5: 200K). Imported at call time, like ``_get_cache_prices``: importing
+    ``headroom.pricing`` pulls in litellm (~4s) and this module is on the
+    proxy's startup path. Falls back to 200K if the lookup fails.
+    """
+    try:
+        from headroom.pricing.counterfactual import long_context_threshold
+
+        return long_context_threshold(model)
+    except Exception:
+        return 200_000
 
 
 def _bucket_by_cache_mix(
@@ -1092,7 +1103,7 @@ class CostTracker:
         write_5m_eff = 0 if cache_inferred else max(0, cache_write_5m_tokens)
         write_1h_eff = 0 if cache_inferred else max(0, cache_write_1h_tokens)
         billed_prompt = max(0, cache_read_tokens) + write_eff + max(0, uncached_tokens)
-        long_context = max(billed_prompt, tokens_sent) > _LONG_CONTEXT_THRESHOLD_TOKENS
+        long_context = max(billed_prompt, tokens_sent) > _long_context_threshold(model)
         if tokens_saved > 0:
             # Message compression works the LIVE ZONE only: handlers freeze the
             # cached prefix (system + prior turns) byte-for-byte for prefix-cache
@@ -1375,8 +1386,9 @@ class CostTracker:
     def _get_output_price(self, model: str, *, long_context: bool = False) -> float | None:
         """Get the per-token completion price for a model, or None if unpriced.
 
-        ``long_context`` selects the catalog's above-200k completion rate where
-        the model publishes one (Anthropic charges 1.5x there).
+        ``long_context`` selects the completion rate of the model's
+        long-context tier where it publishes one (Sonnet 4.5 above 200K: 1.5x;
+        Haiku 5.5 above 100K: 5x).
         """
         litellm = _get_litellm_module()
         if litellm is None:
@@ -1388,7 +1400,11 @@ class CostTracker:
             info = litellm.model_cost.get(resolved, {})
             base = info.get("output_cost_per_token")
             if long_context:
-                return info.get("output_cost_per_token_above_200k_tokens") or base or None
+                from headroom.pricing.counterfactual import long_context_tier
+
+                tier = long_context_tier(info)
+                if tier:
+                    return info.get(f"output_cost_per_token{tier[1]}") or base or None
             return base or None
         except Exception:
             return None
@@ -1433,9 +1449,9 @@ class CostTracker:
         ``headroom.pricing.cache_ttl`` derives it. Previously every 1h write was
         priced at the 5m rate.
 
-        ``long_context`` picks the above-200k tier for each rate, falling back
-        per rate to the base one for a model that publishes no long-context
-        price.
+        ``long_context`` picks the model's long-context tier for each rate,
+        falling back per rate to the base one for a model that publishes no
+        long-context price.
 
         Imported at call time: ``headroom.pricing`` eagerly imports litellm
         (~4s) and this module is on the proxy's startup path.
