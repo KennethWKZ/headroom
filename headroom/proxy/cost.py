@@ -302,16 +302,25 @@ def build_prefix_cache_stats(
                     price_per_1m = cost_tracker._get_list_price(model_name)
                     if price_per_1m:
                         input_price_per_token = price_per_1m / 1_000_000
-                        cache_prices = cost_tracker._get_cache_prices(model_name)
+                        try:
+                            from headroom.pricing.counterfactual import resolve_rates
+
+                            cache_prices = resolve_rates(model_name)
+                        except Exception:
+                            cache_prices = None
                         best_tokens = tokens_sent
 
         # Catalog rates win; the provider ratio table is the fallback for a model
         # that publishes no cache pricing.
         pricing_source = "provider_default"
         if cache_prices and input_price_per_token:
-            _cr_price, _cw5_price, _cw1h_price, _uncached_price = cache_prices
+            _cr_price = cache_prices.read
+            _cw5_price = cache_prices.write_5m
+            _cw1h_price = cache_prices.write_1h
+            _uncached_price = cache_prices.uncached
             if _uncached_price:
-                read_mult = _cr_price / _uncached_price
+                if cache_prices.read_is_catalog:
+                    read_mult = _cr_price / _uncached_price
                 # Blend the two write rates by the TTL mix this provider
                 # actually wrote at, rather than charging every write the 5m
                 # rate. Falls back to the 5m rate when nothing was written yet.
@@ -320,8 +329,12 @@ def build_prefix_cache_stats(
                 _w5 = max(0, _w_all - _w1h)
                 _w_cost = _w5 * _cw5_price + _w1h * _cw1h_price
                 _blended_write = (_w_cost / _w_all) if _w_all > 0 else _cw5_price
-                write_mult = _blended_write / _uncached_price
-                pricing_source = "catalog"
+                if cache_prices.write_is_catalog:
+                    write_mult = _blended_write / _uncached_price
+                if cache_prices.read_is_catalog and (cache_prices.write_is_catalog or not _w_all):
+                    pricing_source = "catalog"
+                elif cache_prices.read_is_catalog or cache_prices.write_is_catalog:
+                    pricing_source = "mixed"
 
         # Calculate savings:
         # Cache reads save (1.0 - read_mult) per token vs uncached input price.
@@ -1186,13 +1199,13 @@ class CostTracker:
             self._api_cache_read_by_model.get(model, 0) + cache_read_tokens
         )
         self._api_cache_write_by_model[model] = (
-            self._api_cache_write_by_model.get(model, 0) + cache_write_tokens
+            self._api_cache_write_by_model.get(model, 0) + write_eff
         )
         self._api_cache_write_5m_by_model[model] = (
-            self._api_cache_write_5m_by_model.get(model, 0) + cache_write_5m_tokens
+            self._api_cache_write_5m_by_model.get(model, 0) + write_5m_eff
         )
         self._api_cache_write_1h_by_model[model] = (
-            self._api_cache_write_1h_by_model.get(model, 0) + cache_write_1h_tokens
+            self._api_cache_write_1h_by_model.get(model, 0) + write_1h_eff
         )
         self._api_uncached_by_model[model] = (
             self._api_uncached_by_model.get(model, 0) + uncached_tokens
@@ -1442,7 +1455,7 @@ class CostTracker:
         return w5m * w5m_price + w1h * w1h_price
 
     def _get_cache_prices(
-        self, model: str, *, long_context: bool = False
+        self, model: str, *, long_context: bool = False, for_billing: bool = True
     ) -> tuple[float, float, float, float] | None:
         """Per-token prices for (cache read, 5m write, 1h write, uncached input).
 
@@ -1451,6 +1464,10 @@ class CostTracker:
         place cache rates are resolved — for the live cost card here, the
         persisted tracker, and the durable ledger alike, so the three cannot
         drift apart again.
+
+        ``for_billing`` resolves missing cache catalog rates through LiteLLM's
+        billing calculator. Savings consumers opt out to keep the resolver's
+        counterfactual estimates.
 
         The 1h write rate is new: LiteLLM publishes it per model as
         ``cache_creation_input_token_cost_above_1hr`` (Sonnet: 2.00x base), and
@@ -1468,7 +1485,7 @@ class CostTracker:
         try:
             from headroom.pricing.counterfactual import resolve_rates
 
-            rates = resolve_rates(model, long_context=long_context)
+            rates = resolve_rates(model, long_context=long_context, for_billing=for_billing)
         except Exception:
             return None
         if rates is None or not rates.uncached:
@@ -1627,7 +1644,7 @@ class CostTracker:
             | set(self._saved_list_by_tier)
         ):
             model, long_context = key
-            prices = self._get_cache_prices(model, long_context=long_context)
+            prices = self._get_cache_prices(model, long_context=long_context, for_billing=False)
             if not prices:
                 continue
             _cr_price, cw5_price, cw1h_price, uncached_price = prices
@@ -1680,7 +1697,7 @@ class CostTracker:
             | set(self._tool_saved_list_by_model)
         )
         for model in tool_models:
-            prices = self._get_cache_prices(model)
+            prices = self._get_cache_prices(model, for_billing=False)
             if not prices:
                 continue
             cr_price, cw5_price, cw1h_price, uncached_price = prices

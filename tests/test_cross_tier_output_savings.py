@@ -121,3 +121,38 @@ def test_optional_output_rate_metadata_is_fail_soft(haiku_card, base, long, prem
     )
     assert priced["compression"] == pytest.approx(0.046 + premium)
     assert priced["compression_list"] == pytest.approx(0.01)
+
+
+def test_billing_preserves_explicit_zero_cache_rates_at_the_model_tier(haiku_card):
+    import litellm
+
+    row = litellm.model_cost["claude-haiku-5-5"]
+    for field in (
+        "cache_read_input_token_cost",
+        "cache_creation_input_token_cost",
+        "cache_creation_input_token_cost_above_1hr",
+    ):
+        row[f"{field}_above_100k_tokens"] = 0.0
+    rates = resolve_rates("claude-haiku-5-5", long_context=True, for_billing=True)
+    assert rates is not None
+    assert rates.uncached == 5e-7
+    assert (rates.read, rates.write_5m, rates.write_1h) == (0.0, 0.0, 0.0)
+    assert rates.read_is_catalog and rates.write_is_catalog
+
+
+def test_missing_billed_cache_rates_probe_the_model_specific_threshold(haiku_card, monkeypatch):
+    import litellm
+
+    prompts = []
+
+    def canonical_cost(**kwargs):
+        prompts.append(kwargs["prompt_tokens"])
+        return kwargs["prompt_tokens"] * 3e-8, 0.0
+
+    monkeypatch.setattr(litellm, "cost_per_token", canonical_cost)
+    rates = resolve_rates("claude-haiku-5-5", long_context=True, for_billing=True)
+    assert rates is not None
+    assert rates.read == pytest.approx(3e-8)
+    assert rates.write_5m == pytest.approx(3e-8)
+    assert prompts == [100_001, 100_001]
+    assert not rates.read_is_catalog and not rates.write_is_catalog
