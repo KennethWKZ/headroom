@@ -527,17 +527,19 @@ def long_context_premium_avoided_usd(
     mix: CacheMix,
     *,
     local_tokens: int = 0,
+    output_tokens: int = 0,
     provider: str | None = None,
 ) -> float:
-    """Long-context premium a request's forwarded input avoided, in USD.
+    """Long-context premium a request's forwarded input and output avoided, in USD.
 
     For a request whose uncompressed prompt would have passed ``model``'s
     long-context threshold but whose forwarded prompt did not: the provider
     re-prices the WHOLE request above the threshold, so compression saved the
     long card on every forwarded input token, on top of the removed tokens
     themselves. This is that difference, forwarded input at the long card minus
-    the same input at the base card. Output is not included; a caller that
-    knows the completion tokens adds their premium itself.
+    the same input at the base card. When ``output_tokens`` is supplied, include
+    the premium avoided on that generated output too. These tokens were still
+    generated; this is compression savings, not output-shaping savings.
 
     ``local_tokens`` stands in as uncached input when the provider reported no
     breakdown. Returns 0.0 for a model with no tier or no catalog row.
@@ -559,7 +561,21 @@ def long_context_premium_avoided_usd(
         )
     else:
         split = TokenSplit(uncached=float(max(_coerce_int(local_tokens), 0)))
-    return max(0.0, long_rates.price(split) - base_rates.price(split))
+    input_premium = max(0.0, long_rates.price(split) - base_rates.price(split))
+    output_premium = 0.0
+    if max(_coerce_int(output_tokens), 0):
+        try:
+            info = _catalog_row(model) or {}
+            tier = long_context_tier(info)
+            base_output = info.get("output_cost_per_token")
+            long_output = info.get(f"output_cost_per_token{tier[1]}") if tier else None
+            if base_output is not None and long_output is not None:
+                output_premium = max(0.0, float(long_output) - float(base_output)) * max(
+                    _coerce_int(output_tokens), 0
+                )
+        except Exception:  # Pricing metadata must not break telemetry.
+            pass
+    return input_premium + output_premium
 
 
 @dataclass(frozen=True)
