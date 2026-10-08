@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from tests._dotenv import (
     autouse_apply_env,
     importorskip_no_env_leak,
@@ -171,6 +173,33 @@ def test_long_context_turn_is_priced_at_the_above_200k_rates():
 
     assert abs(stats["output_cost_usd"] - 5_000 * long_output) < 1e-6
     assert abs(stats["cache_aware_savings_usd"] - 10_000 * long_input) < 1e-6
+
+
+def test_haiku_5_5_prompt_over_100k_is_priced_at_its_long_prompt_card():
+    """Haiku 5.5's tier starts at 100K: a 150K turn pays 5x on input and output."""
+    import litellm
+
+    from headroom.proxy.server import CostTracker
+
+    info = litellm.model_cost.get("claude-haiku-5-5", {})
+    if "input_cost_per_token_above_100k_tokens" not in info:
+        pytest.skip("installed LiteLLM catalog predates Claude Haiku 5.5")
+
+    ct = CostTracker()
+    ct.record_tokens(
+        "claude-haiku-5-5",
+        tokens_saved=10_000,
+        tokens_sent=150_000,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        uncached_tokens=150_000,
+        output_tokens=5_000,
+    )
+    stats = ct.stats()
+
+    # $2.50/M output and $0.50/M input above 100K (base card: $0.50 / $0.10).
+    assert abs(stats["output_cost_usd"] - 5_000 * 2.5e-6) < 1e-9
+    assert abs(stats["cache_aware_savings_usd"] - 10_000 * 5e-7) < 1e-9
 
 
 def _summary(cache_net_usd: float, cost_stats: dict) -> dict:

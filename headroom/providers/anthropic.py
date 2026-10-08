@@ -154,9 +154,9 @@ ANTHROPIC_CONTEXT_LIMITS: dict[str, int] = {
 # NOTE: These are ESTIMATES. Always verify against actual Anthropic billing.
 # Last updated: 2026-09-29 (platform.claude.com/docs/en/about-claude/pricing)
 #
-# Newer ids come before their prefixes: `_get_pricing` falls back to substring
-# matching in insertion order, so a dated or suffixed "claude-sonnet-5-5-..."
-# must hit the Sonnet 5.5 row before it can hit "claude-sonnet-5".
+# Newer ids still come before their prefixes, but order no longer decides a
+# match: `_is_release_of` refuses to read "claude-sonnet-5-5-..." as a release
+# of "claude-sonnet-5".
 ANTHROPIC_PRICING: dict[str, dict[str, float]] = {
     # Claude Fable 5.1: $10 in / $50 out, cache read $0.25 (0.025x input).
     "claude-fable-5-1": {"input": 10.00, "output": 50.00, "cached_input": 0.25},
@@ -233,6 +233,38 @@ _LONG_CONTEXT_TIERS: tuple[tuple[tuple[str, ...], int, dict[str, float]], ...] =
     (_LONG_CONTEXT_TIERED_MODELS, _LONG_CONTEXT_THRESHOLD, _LONG_CONTEXT_PREMIUM),
     (("claude-haiku-5-5",), _HAIKU_5_5_LONG_PROMPT_THRESHOLD, _HAIKU_5_5_LONG_PROMPT_PREMIUM),
 )
+
+
+# A dated release (`-20250929`) or `-latest` alias of a model id.
+_RELEASE_SUFFIX_RE = re.compile(r"-(?:\d{8}|latest)")
+# A further version segment (the `-5` in `claude-haiku-5-5`): another model.
+_VERSION_SEGMENT_RE = re.compile(r"-\d{1,2}(?!\d)")
+
+
+def _is_release_of(model: str, known_model: str) -> bool:
+    """True when ``model`` names ``known_model``, or a release or alias of it.
+
+    The fallback tables are keyed by a mix of undated and dated ids, so a
+    lookup accepts:
+
+    - a longer id containing ``known_model``: a dated release or a provider
+      wrapped id (``claude-sonnet-4-5-20250929``,
+      ``anthropic.claude-haiku-5-5-v1:0``);
+    - an undated alias of a dated key (``claude-3-5-sonnet`` for
+      ``claude-3-5-sonnet-20241022``), or its ``-latest`` form.
+
+    An id one version segment away is a different model and does not match:
+    ``claude-haiku-5`` is not ``claude-haiku-5-5``, and ``claude-sonnet-5-5``
+    is not ``claude-sonnet-5``.
+    """
+    if model == known_model:
+        return True
+    if known_model.startswith(model):
+        return bool(_RELEASE_SUFFIX_RE.fullmatch(known_model[len(model) :]))
+    at = model.find(known_model)
+    if at < 0:
+        return False
+    return not _VERSION_SEGMENT_RE.match(model, at + len(known_model))
 
 
 def _apply_long_context_premium(
@@ -776,9 +808,10 @@ class AnthropicProvider(Provider):
         if model in self._context_limits:
             return self._context_limits[model]
 
-        # Check for partial matches (e.g., "claude-3-5-sonnet" matches "claude-3-5-sonnet-20241022")
+        # Releases and aliases of a known id (e.g. "claude-3-5-sonnet" matches
+        # "claude-3-5-sonnet-20241022"); see `_is_release_of`.
         for known_model, limit in self._context_limits.items():
-            if model in known_model or known_model in model:
+            if _is_release_of(model, known_model):
                 return limit
 
         # Try LiteLLM for context limit
@@ -894,9 +927,9 @@ class AnthropicProvider(Provider):
         if model in self._pricing:
             return self._pricing[model]
 
-        # Partial match
+        # Releases and aliases of a known id; see `_is_release_of`.
         for known_model, prices in self._pricing.items():
-            if model in known_model or known_model in model:
+            if _is_release_of(model, known_model):
                 return prices
 
         # Pattern-based inference

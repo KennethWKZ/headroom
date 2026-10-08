@@ -519,6 +519,7 @@ def estimate_request_savings_usd(
         CacheMix,
         PricedSavings,
         Region,
+        long_context_threshold,
         price_savings,
         weakest_basis,
     )
@@ -531,7 +532,9 @@ def estimate_request_savings_usd(
         uncached_input_tokens=uncached_input_tokens,
         cache_inferred=cache_inferred,
     )
-    long_context = mix.is_long_context(local_tokens=local_input_tokens)
+    long_context = mix.is_long_context(
+        local_tokens=local_input_tokens, threshold=long_context_threshold(model)
+    )
 
     def _price(tokens: Any, region: Region) -> PricedSavings:
         return price_savings(

@@ -342,3 +342,39 @@ class TestAnthropicCostEstimation:
     )
     def test_context_limit_claude_5_point_releases(self, anthropic_provider, model):
         assert anthropic_provider.get_context_limit(model) == 1_000_000
+
+    def test_shorter_id_does_not_inherit_a_newer_release(self, monkeypatch):
+        """``claude-haiku-5`` is not ``claude-haiku-5-5``: no 1M window, no 5.5 card.
+
+        It falls through to the ``haiku`` pattern default instead, as it did
+        before Haiku 5.5 had a row.
+        """
+        import headroom.providers.anthropic as anthropic_module
+
+        monkeypatch.setattr(anthropic_module, "_get_litellm_clients", lambda: (None, None))
+        provider = anthropic_module.AnthropicProvider()
+        haiku_default = anthropic_module._PATTERN_DEFAULTS["haiku"]
+        assert provider.get_context_limit("claude-haiku-5") == haiku_default["context"]
+        assert provider._get_pricing("claude-haiku-5") == haiku_default["pricing"]
+
+    @pytest.mark.parametrize(
+        ("model", "known_model", "expected"),
+        [
+            ("claude-sonnet-4-5-20250929", "claude-sonnet-4-5", True),
+            ("anthropic.claude-haiku-5-5-v1:0", "claude-haiku-5-5", True),
+            ("claude-3-5-sonnet", "claude-3-5-sonnet-20241022", True),
+            ("claude-3-5-haiku", "claude-3-5-haiku-latest", True),
+            ("claude-sonnet-4", "claude-sonnet-4-20250514", True),
+            # One version segment away is another model, in either direction.
+            ("claude-haiku-5", "claude-haiku-5-5", False),
+            ("claude-sonnet-4", "claude-sonnet-4-6", False),
+            ("claude-sonnet-5-5", "claude-sonnet-5", False),
+            ("claude-sonnet-5-5-20261001", "claude-sonnet-5", False),
+            # A bare fragment is not an alias.
+            ("sonnet", "claude-3-5-sonnet-20241022", False),
+        ],
+    )
+    def test_is_release_of(self, model, known_model, expected):
+        from headroom.providers.anthropic import _is_release_of
+
+        assert _is_release_of(model, known_model) is expected
