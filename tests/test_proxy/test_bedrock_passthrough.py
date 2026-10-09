@@ -61,6 +61,7 @@ class _FakeUpstream:
 
     def json(self):
         import json
+
         return json.loads(b"".join(self._chunks).decode())
 
     async def aclose(self):
@@ -508,10 +509,9 @@ def test_native_intercept_returns_anthropic_shape():
 
         # Mock handle_anthropic_messages to return an Anthropic-style JSON
         from fastapi.responses import JSONResponse
+
         proxy.handle_anthropic_messages = AsyncMock(
-            return_value=JSONResponse(
-                content={"type": "message", "role": "assistant"}
-            )
+            return_value=JSONResponse(content={"type": "message", "role": "assistant"})
         )
 
         body = {
@@ -530,18 +530,15 @@ def test_native_intercept_returns_anthropic_shape():
 
         # Mock stream response
         from fastapi.responses import StreamingResponse
+
         async def stream_gen():
             yield b'event: message_start\ndata: {"type": "message_start"}\n\n'
 
         proxy.handle_anthropic_messages = AsyncMock(
-            return_value=StreamingResponse(
-                stream_gen(),
-                media_type="text/event-stream"
-            )
+            return_value=StreamingResponse(stream_gen(), media_type="text/event-stream")
         )
 
         resp_stream = client.post(INVOKE_STREAM, json=body)
 
     assert resp_stream.status_code == 200
     assert b"event: message_start" in resp_stream.content
-

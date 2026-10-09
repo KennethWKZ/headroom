@@ -338,9 +338,7 @@ def register_provider_routes(app: FastAPI, proxy: Any) -> None:
 
         @app.post("/model/{model_id:path}/invoke-with-response-stream")
         async def bedrock_native_invoke_stream(request: Request, model_id: str):
-            return await proxy.handle_anthropic_messages(
-                request, None, "anthropic", model_id, True
-            )
+            return await proxy.handle_anthropic_messages(request, None, "anthropic", model_id, True)
 
         @app.get("/inference-profiles")
         async def bedrock_native_inference_profiles(request: Request):
