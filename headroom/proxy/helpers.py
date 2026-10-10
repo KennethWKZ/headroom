@@ -1905,6 +1905,18 @@ def _warn_once_if_owner_only_unsupported(log_path: Path) -> None:
     )
 
 
+def _headroom_log_level() -> int:
+    """Level for the ``headroom`` logger and the proxy.log handler.
+
+    ``HEADROOM_LOG_LEVEL=debug`` (or ``trace``) turns on Headroom's own debug
+    lines as well as uvicorn's; anything else keeps the INFO default, so the
+    default (``warning``, which only quiets uvicorn) never hides Headroom's
+    INFO events.
+    """
+    raw = os.environ.get("HEADROOM_LOG_LEVEL", "").strip().lower()
+    return logging.DEBUG if raw in ("debug", "trace") else logging.INFO
+
+
 def _setup_file_logging(
     port: int | None = None,
     *,
@@ -1951,7 +1963,8 @@ def _setup_file_logging(
         # Keep root propagation enabled for container stdout/stderr while
         # this handler writes the separate port/worker-specific proxy log.
         headroom_logger = logging.getLogger("headroom")
-        headroom_logger.setLevel(logging.INFO)
+        level = _headroom_log_level()
+        headroom_logger.setLevel(level)
         # Decide BEFORE constructing the handler: constructing a
         # RotatingFileHandler opens (creates) the file, so building one only to
         # discard it would leave an empty stray worker log and leak
@@ -1972,7 +1985,7 @@ def _setup_file_logging(
             encoding="utf-8",
         )
         handler.set_name(_PROXY_LOG_HANDLER_NAME)
-        handler.setLevel(logging.INFO)
+        handler.setLevel(level)
         handler.setFormatter(
             logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
         )
