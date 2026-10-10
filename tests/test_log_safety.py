@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import importlib
+import json
 import logging
 import os
+import py_compile
+import sys
+import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -143,17 +149,14 @@ def test_forget_rearms_a_key() -> None:
 
 
 def test_frame_paths_are_package_relative_for_headroom_and_bare_otherwise() -> None:
-    package_dir = os.path.dirname(log_safety.__file__)
+    with pytest.raises(ValueError) as headroom_error:
+        WarnOnce(limit=0, what="failures")
+    with pytest.raises(json.JSONDecodeError) as stdlib_error:
+        json.loads("{")
 
-    assert log_safety._short_path(os.path.join(package_dir, "proxy", "server.py")) == (
-        "headroom/proxy/server.py"
-    )
-    assert log_safety._short_path("/home/runner/work/headroom/headroom/tests/test_x.py") == (
-        "test_x.py"
-    )
-    assert log_safety._short_path("/repo/headroom/.venv/lib/site-packages/httpx/_client.py") == (
-        "_client.py"
-    )
+    assert "at headroom/log_safety.py:" in describe_exception(headroom_error.value)
+    assert " in __init__" in describe_exception(headroom_error.value)
+    assert "decoder.py:" in describe_exception(stdlib_error.value)
 
 
 def test_raise_from_none_hides_the_suppressed_context(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -270,18 +273,54 @@ def test_forget_cycles_cannot_exceed_the_window_budget(caplog: pytest.LogCapture
     assert len(_warnings(caplog)) == 4  # three warnings plus one overflow notice
 
 
-def test_dynamic_code_locations_are_not_logged(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("filename", "module_name"),
+    [
+        ("sk-FILE-CANARY\nforged", None),
+        (os.__file__, "os"),
+        (log_safety.__file__, "headroom.log_safety"),
+    ],
+,
+    ids=["forged-name", "claims-stdlib-file", "claims-headroom-module"],
+)
+def test_runtime_compiled_frames_are_not_logged(
+    monkeypatch: pytest.MonkeyPatch, filename: str, module_name: str | None
+) -> None:
+    """Runtime code may claim a real file and module name; its own names still stay out."""
     monkeypatch.delenv("HEADROOM_DEBUG_DUMP", raising=False)
-    code = compile(
-        "def sk_CANARY():\n    raise ValueError('x')\n", "sk-FILE-CANARY\nforged", "exec"
-    )
-    namespace: dict[str, object] = {}
+    code = compile("def sk_FUNC_CANARY():\n    raise ValueError('x')\n", filename, "exec")
+    namespace: dict[str, object] = {} if module_name is None else {"__name__": module_name}
     exec(code, namespace)
-    try:
-        namespace["sk_CANARY"]()  # type: ignore[operator]
-    except ValueError as exc:
-        text = describe_exception(exc)
+    with pytest.raises(ValueError) as caught:
+        namespace["sk_FUNC_CANARY"]()  # type: ignore[operator]
 
+    text = describe_exception(caught.value)
     assert "CANARY" not in text
     assert "<dynamic code>" in text
-    assert "tests/test_log_safety.py" in text or "test_log_safety.py" in text
+    assert "test_log_safety.py:" in text  # the calling test frame keeps its location
+
+
+def test_zip_and_sourceless_modules_keep_their_locations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = "def boom():\n    raise ValueError('x')\n"
+    with zipfile.ZipFile(tmp_path / "bundle.zip", "w") as bundle:
+        bundle.writestr("zipped_mod.py", source)
+    (tmp_path / "pyc_mod.py").write_text(source)
+    py_compile.compile(str(tmp_path / "pyc_mod.py"), cfile=str(tmp_path / "pyc_mod.pyc"))
+    (tmp_path / "pyc_mod.py").unlink()
+    monkeypatch.syspath_prepend(str(tmp_path / "bundle.zip"))
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.invalidate_caches()
+    for name in ("zipped_mod", "pyc_mod"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    texts = []
+    for name in ("zipped_mod", "pyc_mod"):
+        module = importlib.import_module(name)
+        with pytest.raises(ValueError) as caught:
+            module.boom()
+        texts.append(describe_exception(caught.value))
+
+    assert "zipped_mod.py:2 in boom" in texts[0]
+    assert "pyc_mod.pyc:2 in boom" in texts[1]

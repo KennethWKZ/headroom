@@ -16,10 +16,12 @@ from __future__ import annotations
 import logging
 import math
 import os
+import sys
 import threading
 import time
 import traceback
 from collections.abc import Hashable
+from types import FrameType, ModuleType, TracebackType
 from urllib.parse import urlsplit, urlunsplit
 
 CONTENT_OPT_IN_ENV = "HEADROOM_DEBUG_DUMP"
@@ -28,7 +30,6 @@ _MAX_FRAMES = 3
 _MAX_CHAIN = 4
 _ID_MAX_CHARS = 80
 _MAX_ERRNO = 2**31 - 1
-_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__)).replace("\\", "/")
 
 
 def content_logging_enabled() -> bool:
@@ -73,9 +74,9 @@ def _describe_one(exc: BaseException) -> str:
             text += f" [Errno {exc.errno}]"
         else:
             text += " [Errno out of range]"
-    frames = traceback.extract_tb(exc.__traceback__)[-_MAX_FRAMES:]
+    frames = _innermost_frames(exc.__traceback__)
     if frames:
-        where = " <- ".join(_frame_location(frame) for frame in reversed(frames))
+        where = " <- ".join(_frame_location(frame, line) for frame, line in reversed(frames))
         text += f" at {where}"
     return text
 
@@ -87,24 +88,47 @@ def _errno_text(errno: int) -> str:
         return "unknown error"
 
 
-def _frame_location(frame: traceback.FrameSummary) -> str:
-    """``file:line in function`` for code on disk, a fixed token for anything else.
+def _innermost_frames(tb: TracebackType | None) -> list[tuple[FrameType, int]]:
+    frames: list[tuple[FrameType, int]] = []
+    while tb is not None:
+        frames.append((tb.tb_frame, tb.tb_lineno))
+        tb = tb.tb_next
+    return frames[-_MAX_FRAMES:]
 
-    Code compiled at runtime (``exec``, ``compile``, templates) chooses its own
-    file and function names, which can quote request data, so neither is logged.
+
+def _frame_location(frame: FrameType, lineno: int) -> str:
+    """``file:line in function`` for a frame of an imported module, a fixed token otherwise.
+
+    Code compiled at runtime (``exec``, ``compile``, template engines) chooses its
+    own file and function names, which can quote request data, and it can claim
+    the name of a real file. Such code runs in a namespace of its own, so a frame
+    is trusted only when its globals are the namespace of the module that
+    ``sys.modules`` holds under that name. The location is then built from the
+    module rather than the code object, which keeps sourceless (``.pyc``-only)
+    and zip installs readable. Code exec'd into a real module's own namespace
+    (dataclass-generated methods) passes; its names come from that module.
     """
-    filename, name = frame.filename, frame.name
-    if not (os.path.isfile(filename) and filename.isprintable() and name.isprintable()):
+    module_name = frame.f_globals.get("__name__")
+    module = sys.modules.get(module_name) if isinstance(module_name, str) else None
+    function = frame.f_code.co_name
+    if (
+        not isinstance(module, ModuleType)
+        or vars(module) is not frame.f_globals
+        or not function.isprintable()
+    ):
         return "<dynamic code>"
-    return f"{_short_path(filename)}:{frame.lineno} in {name}"
+    return f"{_module_path(module)}:{lineno} in {function}"
 
 
-def _short_path(path: str) -> str:
-    """``headroom/<module path>`` for Headroom's own files, the file name for anything else."""
-    normalized = path.replace("\\", "/")
-    if normalized.startswith(_PACKAGE_DIR + "/"):
-        return "headroom/" + normalized[len(_PACKAGE_DIR) + 1 :]
-    return normalized.rsplit("/", 1)[-1]
+def _module_path(module: ModuleType) -> str:
+    """``headroom/<module path>`` for Headroom's own modules, the file name for others."""
+    name = module.__name__
+    if name == "headroom" or name.startswith("headroom."):
+        path = name.replace(".", "/")
+        return path + ("/__init__.py" if hasattr(module, "__path__") else ".py")
+    filename = getattr(module, "__file__", None)
+    base = filename.replace("\\", "/").rsplit("/", 1)[-1] if isinstance(filename, str) else ""
+    return base if base and base.isprintable() else "<module>"
 
 
 def redact_url(url: str) -> str:
