@@ -114,7 +114,7 @@ def test_warn_once_stays_bounded_across_repeated_passes(caplog: pytest.LogCaptur
     messages = _warnings(caplog)
     assert len(messages) == 65  # 64 keys plus one overflow notice, not 65 per pass
     assert messages[-1] == (
-        "More than 64 distinct unwritable ledgers; further ones are logged at debug only "
+        "More than 64 distinct unwritable ledgers; further ones are not logged at WARNING "
         "for the next 60 minutes"
     )
 

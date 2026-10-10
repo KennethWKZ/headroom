@@ -190,7 +190,7 @@ class WarnOnce:
             remaining = self._window - (now - started)
         if report_overflow:
             log.warning(
-                "More than %d distinct %s; further ones are logged at debug only "
+                "More than %d distinct %s; further ones are not logged at WARNING "
                 "for the next %d minutes",
                 self._limit,
                 self._what,
