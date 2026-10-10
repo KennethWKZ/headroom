@@ -1917,6 +1917,27 @@ def _headroom_log_level() -> int:
     return logging.DEBUG if raw in ("debug", "trace") else logging.INFO
 
 
+class _HeadroomDebugStaysInProxyLog(logging.Filter):
+    """Drop ``headroom.*`` DEBUG records on every handler except proxy.log.
+
+    Headroom's debug lines can carry request-derived data (the router logs the
+    tool output it compresses). proxy.log is owner-only; stdout, container logs
+    and wrap's stdio capture are not, so debug stays out of them, exactly as
+    when debug was unreachable.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.INFO:
+            return True
+        return record.name != "headroom" and not record.name.startswith("headroom.")
+
+
+def _keep_headroom_debug_out_of_root_handlers() -> None:
+    for root_handler in logging.getLogger().handlers:
+        if not any(isinstance(f, _HeadroomDebugStaysInProxyLog) for f in root_handler.filters):
+            root_handler.addFilter(_HeadroomDebugStaysInProxyLog())
+
+
 def _setup_file_logging(
     port: int | None = None,
     *,
@@ -1976,7 +1997,12 @@ def _setup_file_logging(
             for h in headroom_logger.handlers
             if isinstance(h, RotatingFileHandler) and h.name == _PROXY_LOG_HANDLER_NAME
         ]
-        if any(Path(h.baseFilename) == log_path for h in existing):
+        if level == logging.DEBUG:
+            _keep_headroom_debug_out_of_root_handlers()
+        reused = [h for h in existing if Path(h.baseFilename) == log_path]
+        if reused:
+            for h in reused:
+                h.setLevel(level)
             return
         handler = handler_cls(
             log_path,
@@ -1993,6 +2019,14 @@ def _setup_file_logging(
             headroom_logger.removeHandler(stale)
             stale.close()
         headroom_logger.addHandler(handler)
+        if level == logging.DEBUG:
+            logger.warning(
+                "Headroom debug logging is on (HEADROOM_LOG_LEVEL). %s now records "
+                "request-derived data, including tool output being compressed; the file is "
+                "owner-only and debug lines stay out of stdout. Unset HEADROOM_LOG_LEVEL "
+                "when you finish diagnosing.",
+                log_path,
+            )
     except OSError:
         # Non-fatal: can't write logs (read-only fs, permissions, etc.)
         pass
