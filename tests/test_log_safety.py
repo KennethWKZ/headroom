@@ -5,9 +5,11 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import math
 import os
 import py_compile
 import sys
+import types
 import zipfile
 from pathlib import Path
 
@@ -323,3 +325,80 @@ def test_zip_and_sourceless_modules_keep_their_locations(
 
     assert "zipped_mod.py:2 in boom" in texts[0]
     assert "pyc_mod.pyc:2 in boom" in texts[1]
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["sk-ant-abc123:x", "AKIAABCDEFGH:secret", "myuser:hunter2@db:5432", "AKIASECRET://host/x"],
+)
+def test_text_that_is_not_a_url_never_reaches_the_log(value: str) -> None:
+    text = redact_url(value)
+    for secret in ("sk-ant", "abc123", "AKIA", "akia", "hunter2", "myuser", "SECRET", "secret"):
+        assert secret not in text
+
+
+@pytest.mark.parametrize("host", ["a b", "a\x0bb\x0cc", "a\x85b"])
+def test_hosts_with_line_breaks_are_not_logged(host: str) -> None:
+    assert redact_url(f"http://{host}/") == "<unparseable url>"
+
+
+def test_class_names_cannot_forge_a_log_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HEADROOM_DEBUG_DUMP", raising=False)
+    forged = type("Err\nWARNING forged sk-QUAL", (Exception,), {})
+
+    text = describe_exception(forged("x"))
+
+    assert "\n" not in text and "sk-QUAL" not in text
+    assert text.startswith("<exception>")
+
+
+def test_odd_errno_and_module_objects_never_break_the_description(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("HEADROOM_DEBUG_DUMP", raising=False)
+
+    class FormatsItself(int):
+        def __format__(self, spec: str) -> str:
+            return "sk-ERRNO-CANARY"
+
+    exc = OSError()
+    exc.errno = FormatsItself(2)
+    assert "CANARY" not in describe_exception(exc)
+
+    class RaisingGet(dict):  # type: ignore[type-arg]
+        def get(self, *args: object) -> object:
+            raise RuntimeError("get")
+
+    namespace = RaisingGet()
+    exec(compile("def boom():\n    raise ValueError('x')\n", "<x>", "exec"), namespace)
+    with pytest.raises(ValueError) as caught:
+        namespace["boom"]()
+    assert "<dynamic code>" in describe_exception(caught.value)
+
+    lazy = types.ModuleType("lazy_sk_mod")
+
+    def lazy_getattr(attr: str) -> str:
+        return "sk-FILE-CANARY.py"
+
+    lazy.__getattr__ = lazy_getattr  # type: ignore[method-assign]
+    monkeypatch.setitem(sys.modules, "lazy_sk_mod", lazy)
+    exec(compile("def boom():\n    raise ValueError('x')\n", "<x>", "exec"), vars(lazy))
+    with pytest.raises(ValueError) as caught:
+        lazy.boom()
+    assert "CANARY" not in describe_exception(caught.value)
+
+
+def test_safe_id_never_raises() -> None:
+    class BadRepr:
+        def __repr__(self) -> str:
+            raise RuntimeError("repr")
+
+    huge = 10 ** int("5000")
+    assert safe_id(huge) == "<unrepresentable id>"
+    assert safe_id(BadRepr()) == "<unrepresentable id>"
+
+
+@pytest.mark.parametrize("window", [math.inf, math.nan, 0, -1])
+def test_warn_once_needs_a_finite_positive_window(window: float) -> None:
+    with pytest.raises(ValueError, match="window_seconds must be positive and finite"):
+        WarnOnce(limit=1, what="failures", window_seconds=window)
