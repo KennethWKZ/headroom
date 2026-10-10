@@ -253,3 +253,34 @@ def test_parse_log_files_aggregates_per_port_and_legacy(workspace: Path) -> None
     # Non-PERF files never ingested.
     assert models.isdisjoint({"model-STDIO", "model-STDIO2", "model-ERR"})
     assert rids.isdisjoint({"hr_stdio", "hr_stdio2", "hr_err"})
+
+
+@pytest.mark.parametrize(
+    ("env", "debug_written"),
+    [("debug", True), ("TRACE", True), ("warning", False), ("info", False), (None, False)],
+)
+def test_headroom_log_level_debug_reaches_proxy_log(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    env: str | None,
+    debug_written: bool,
+) -> None:
+    """``HEADROOM_LOG_LEVEL=debug`` must surface Headroom's own debug lines, not only uvicorn's."""
+    headroom_logger = logging.getLogger("headroom")
+    request.addfinalizer(lambda level=headroom_logger.level: headroom_logger.setLevel(level))
+    if env is None:
+        monkeypatch.delenv("HEADROOM_LOG_LEVEL", raising=False)
+    else:
+        monkeypatch.setenv("HEADROOM_LOG_LEVEL", env)
+
+    _setup_file_logging(port=9911)
+    probe = logging.getLogger("headroom.proxy.log_level_probe")
+    probe.debug("debug-probe")
+    probe.info("info-probe")
+    for handler in headroom_logger.handlers:
+        handler.flush()
+
+    text = _paths.proxy_log_path(9911).read_text()
+    assert "info-probe" in text
+    assert ("debug-probe" in text) is debug_written
