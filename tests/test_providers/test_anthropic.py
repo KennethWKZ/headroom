@@ -201,6 +201,55 @@ class TestLongContextPricing:
         )
         assert cost == pytest.approx(expected, rel=1e-4)
 
+    def test_haiku_5_5_card_survives_litellm_dropping_the_100k_rate(self, provider, monkeypatch):
+        """A Haiku 5.5 entry without the above-100K rate must not bill a long prompt at the base tier."""
+        litellm = pytest.importorskip("litellm")
+        import headroom.providers.anthropic as anthropic_module
+
+        # Keeps the 200K field Sonnet's tier reads, so only Haiku's own field decides.
+        monkeypatch.setitem(
+            litellm.model_cost,
+            "claude-haiku-5-5",
+            {
+                "litellm_provider": "anthropic",
+                "mode": "chat",
+                "input_cost_per_token": 1e-07,
+                "output_cost_per_token": 5e-07,
+                "cache_read_input_token_cost": 1e-08,
+                "input_cost_per_token_above_200k_tokens": 5e-07,
+            },
+        )
+
+        assert provider.estimate_cost(150_000, 5_000, "claude-haiku-5-5", 0) == pytest.approx(
+            0.0875, rel=1e-4
+        )
+        # At the threshold the LiteLLM path still prices it.
+        assert (
+            anthropic_module._litellm_lacks_long_context_rate("claude-haiku-5-5", 100_000) is False
+        )
+
+    def test_haiku_5_5_published_100k_rate_stays_on_litellm(self, monkeypatch):
+        """With its own above-100K rate published, LiteLLM keeps pricing a long Haiku prompt."""
+        litellm = pytest.importorskip("litellm")
+        import headroom.providers.anthropic as anthropic_module
+
+        monkeypatch.setitem(
+            litellm.model_cost,
+            "claude-haiku-5-5",
+            {
+                "litellm_provider": "anthropic",
+                "mode": "chat",
+                "input_cost_per_token": 1e-07,
+                "output_cost_per_token": 5e-07,
+                "input_cost_per_token_above_100k_tokens": 5e-07,
+                "output_cost_per_token_above_100k_tokens": 2.5e-06,
+            },
+        )
+
+        assert (
+            anthropic_module._litellm_lacks_long_context_rate("claude-haiku-5-5", 150_000) is False
+        )
+
 
 class TestLiteLLMCostHelper:
     """The shared helper each provider now uses for LiteLLM-backed pricing.
