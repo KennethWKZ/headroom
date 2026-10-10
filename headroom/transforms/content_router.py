@@ -63,6 +63,7 @@ from ..config import (
     is_tool_excluded,
     unwrap_tool_call,
 )
+from ..log_safety import content_logging_enabled
 from ..offline import OfflineEgressBlocked
 from ..parser import CCR_RETRIEVAL_MARKER_RE
 from ..tokenizer import Tokenizer
@@ -954,7 +955,9 @@ def _bash_command_is_search(command: str, search_commands: frozenset[str]) -> bo
 
 
 def _log_router_debug(event: str, **payload: Any) -> None:
-    if not logger.isEnabledFor(logging.DEBUG):
+    # The payload carries the tool output being routed, so DEBUG alone is not
+    # enough: it is logged only with the explicit content opt-in.
+    if not logger.isEnabledFor(logging.DEBUG) or not content_logging_enabled():
         return
     payload = {"event": event, **payload}
     logger.debug("event=%s %s", event, _router_debug_dumps(payload))

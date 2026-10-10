@@ -376,3 +376,28 @@ def test_headroom_debug_stays_out_of_child_logger_handlers(
     assert "secret-tool-output" in _paths.proxy_log_path(9914).read_text()
     assert "secret-tool-output" not in stream.getvalue()
     assert "info-probe" in stream.getvalue()
+
+
+@pytest.mark.parametrize(("dump", "logged"), [("", False), ("full", True)])
+def test_router_content_dump_needs_the_content_opt_in(
+    monkeypatch: pytest.MonkeyPatch, headroom_log_state: logging.Logger, dump: str, logged: bool
+) -> None:
+    """HEADROOM_LOG_LEVEL=debug alone must not write the tool output the router compresses."""
+    import io
+
+    from headroom.transforms import content_router
+
+    monkeypatch.setenv("HEADROOM_DEBUG_DUMP", dump)
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    router_logger = logging.getLogger(content_router.__name__)
+    previous = router_logger.level
+    router_logger.addHandler(handler)
+    router_logger.setLevel(logging.DEBUG)
+    try:
+        content_router._log_router_debug("routing_decision", content="secret-tool-output")
+    finally:
+        router_logger.removeHandler(handler)
+        router_logger.setLevel(previous)
+
+    assert ("secret-tool-output" in stream.getvalue()) is logged
