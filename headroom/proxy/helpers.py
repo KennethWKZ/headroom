@@ -1920,8 +1920,9 @@ def _headroom_log_level() -> int:
 class _HeadroomDebugStaysInProxyLog(logging.Filter):
     """Drop ``headroom.*`` DEBUG records on every handler except proxy.log.
 
-    Headroom's debug lines can carry request-derived data (the router logs the
-    tool output it compresses). proxy.log is owner-only; stdout, container logs
+    Headroom's debug lines can carry request-derived data (error messages that
+    quote a request; with HEADROOM_DEBUG_DUMP=full, the tool output the router
+    compresses). proxy.log is owner-only; stdout, container logs
     and wrap's stdio capture are not, so debug stays out of them, exactly as
     when debug was unreachable.
     """
@@ -2036,9 +2037,10 @@ def _setup_file_logging(
         if level == logging.DEBUG:
             logger.warning(
                 "Headroom debug logging is on (HEADROOM_LOG_LEVEL). %s now records "
-                "request-derived data, including tool output being compressed; the file is "
-                "owner-only and debug lines stay out of stdout. Unset HEADROOM_LOG_LEVEL "
-                "when you finish diagnosing.",
+                "request-derived data such as error messages that can quote requests; the "
+                "file is owner-only and debug lines stay out of stdout. Full tool-output "
+                "dumps also need HEADROOM_DEBUG_DUMP=full. Unset HEADROOM_LOG_LEVEL when "
+                "you finish diagnosing.",
                 log_path,
             )
     except OSError:
