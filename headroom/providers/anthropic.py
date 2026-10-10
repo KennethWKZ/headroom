@@ -288,9 +288,9 @@ def _apply_long_context_premium(
 def _long_context_tier(model: str) -> tuple[int, dict[str, float]] | None:
     """Return the ``(threshold, premium)`` of the long-context tier ``model`` is in.
 
-    Matches with ``_is_release_of``, as the rate lookup does, so a Bedrock id
-    such as ``us.anthropic.claude-haiku-5-5-v1:0`` that the manual table prices
-    as Haiku 5.5 also gets Haiku 5.5's long-prompt card.
+    Matches with ``_is_release_of``, as the manual rate lookup does, so a
+    Bedrock id such as ``us.anthropic.claude-haiku-5-5-v1:0`` that the manual
+    table prices as Haiku 5.5 also gets Haiku 5.5's long-prompt card.
     """
     for known_models, threshold, premium in _LONG_CONTEXT_TIERS:
         if any(_is_release_of(model, known) for known in known_models):
@@ -309,11 +309,18 @@ def _litellm_lacks_long_context_rate(model: str, input_tokens: int) -> bool:
     Each tier is checked against its own field, named after its threshold
     (``*_above_200k_tokens`` for Sonnet 4 / 4.5, ``*_above_100k_tokens`` for
     Haiku 5.5).
+
+    Only bare Anthropic ids (and their releases) are checked. A wrapped row
+    without the field can be a reseller's deliberately flat rate
+    (``perplexity/anthropic/claude-haiku-5-5``), not a dropped one, and the
+    Bedrock ids LiteLLM has no row for reach the manual table anyway.
     """
-    tier = _long_context_tier(model)
-    if tier is None or input_tokens <= tier[0]:
+    threshold = next(
+        (threshold for ids, threshold, _premium in _LONG_CONTEXT_TIERS if model.startswith(ids)),
+        None,
+    )
+    if threshold is None or input_tokens <= threshold:
         return False
-    threshold, _premium = tier
     rate_field = f"input_cost_per_token_above_{threshold // 1000}k_tokens"
     cost_data = get_litellm_model_cost()
     for candidate in pricing_lookup_candidates(model):

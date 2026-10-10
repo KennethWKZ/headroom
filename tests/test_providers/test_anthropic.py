@@ -269,6 +269,27 @@ class TestLongContextPricing:
         cost = manual_provider.estimate_cost(150_000, 5_000, model, 0)
         assert cost == pytest.approx(expected, rel=1e-4)
 
+    def test_reseller_flat_haiku_5_5_row_keeps_its_litellm_rate(self, provider, monkeypatch):
+        """A reseller row with no long-prompt tier is flat-rated, not a dropped Anthropic rate."""
+        litellm = pytest.importorskip("litellm")
+        import headroom.providers.anthropic as anthropic_module
+
+        monkeypatch.setitem(
+            litellm.model_cost,
+            "perplexity/anthropic/claude-haiku-5-5",
+            {
+                "litellm_provider": "perplexity",
+                "mode": "chat",
+                "input_cost_per_token": 1e-07,
+                "output_cost_per_token": 5e-07,
+            },
+        )
+        # Stub the LiteLLM pricer (see above); the manual card would be $0.0875.
+        monkeypatch.setattr(anthropic_module, "estimate_cost_from_tokens", lambda *a, **k: 0.42)
+
+        cost = provider.estimate_cost(150_000, 5_000, "perplexity/anthropic/claude-haiku-5-5", 0)
+        assert cost == 0.42
+
 
 class TestLiteLLMCostHelper:
     """The shared helper each provider now uses for LiteLLM-backed pricing.
