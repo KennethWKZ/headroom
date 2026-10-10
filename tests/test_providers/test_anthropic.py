@@ -201,11 +201,21 @@ class TestLongContextPricing:
         )
         assert cost == pytest.approx(expected, rel=1e-4)
 
-    def test_haiku_5_5_card_survives_litellm_dropping_the_100k_rate(self, provider, monkeypatch):
+    @pytest.mark.parametrize(
+        "model",
+        # Gateway ids resolve to the same bare row, so they are guarded too.
+        ["claude-haiku-5-5", "anthropic/claude-haiku-5-5", "openrouter/anthropic/claude-haiku-5-5"],
+    )
+    def test_haiku_5_5_card_survives_litellm_dropping_the_100k_rate(
+        self, provider, monkeypatch, model
+    ):
         """A Haiku 5.5 entry without the above-100K rate must not bill a long prompt at the base tier."""
         litellm = pytest.importorskip("litellm")
         import headroom.providers.anthropic as anthropic_module
 
+        # The LiteLLM pricer would return this sentinel; litellm caches model
+        # info, so the patched row below cannot be relied on to reach it.
+        monkeypatch.setattr(anthropic_module, "estimate_cost_from_tokens", lambda *a, **k: 0.42)
         # Keeps the 200K field Sonnet's tier reads, so only Haiku's own field decides.
         monkeypatch.setitem(
             litellm.model_cost,
@@ -220,13 +230,9 @@ class TestLongContextPricing:
             },
         )
 
-        assert provider.estimate_cost(150_000, 5_000, "claude-haiku-5-5", 0) == pytest.approx(
-            0.0875, rel=1e-4
-        )
+        assert provider.estimate_cost(150_000, 5_000, model, 0) == pytest.approx(0.0875, rel=1e-4)
         # At the threshold the LiteLLM path still prices it.
-        assert (
-            anthropic_module._litellm_lacks_long_context_rate("claude-haiku-5-5", 100_000) is False
-        )
+        assert provider.estimate_cost(100_000, 5_000, model, 0) == 0.42
 
     def test_haiku_5_5_published_100k_rate_stays_on_litellm(self, provider, monkeypatch):
         """With its own above-100K rate published, LiteLLM keeps pricing a long Haiku prompt."""
