@@ -1932,10 +1932,24 @@ class _HeadroomDebugStaysInProxyLog(logging.Filter):
         return record.name != "headroom" and not record.name.startswith("headroom.")
 
 
-def _keep_headroom_debug_out_of_root_handlers() -> None:
-    for root_handler in logging.getLogger().handlers:
-        if not any(isinstance(f, _HeadroomDebugStaysInProxyLog) for f in root_handler.filters):
-            root_handler.addFilter(_HeadroomDebugStaysInProxyLog())
+def _keep_headroom_debug_out_of_other_handlers() -> None:
+    """Filter every handler that can see ``headroom.*`` records except proxy.log.
+
+    That is the root handlers, plus any handler already attached to ``headroom``
+    or a child logger (e.g. an extension's). Records stop at proxy.log only.
+    """
+    loggers: list[logging.Logger] = [logging.getLogger(), logging.getLogger("headroom")]
+    loggers += [
+        candidate
+        for name, candidate in logging.Logger.manager.loggerDict.items()
+        if name.startswith("headroom.") and isinstance(candidate, logging.Logger)
+    ]
+    for each in loggers:
+        for handler in each.handlers:
+            if handler.get_name() == _PROXY_LOG_HANDLER_NAME:
+                continue
+            if not any(isinstance(f, _HeadroomDebugStaysInProxyLog) for f in handler.filters):
+                handler.addFilter(_HeadroomDebugStaysInProxyLog())
 
 
 def _setup_file_logging(
@@ -1998,7 +2012,7 @@ def _setup_file_logging(
             if isinstance(h, RotatingFileHandler) and h.name == _PROXY_LOG_HANDLER_NAME
         ]
         if level == logging.DEBUG:
-            _keep_headroom_debug_out_of_root_handlers()
+            _keep_headroom_debug_out_of_other_handlers()
         reused = [h for h in existing if Path(h.baseFilename) == log_path]
         if reused:
             for h in reused:

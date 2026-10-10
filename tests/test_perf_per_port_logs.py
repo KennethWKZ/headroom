@@ -265,7 +265,12 @@ def headroom_log_state(request: pytest.FixtureRequest):
 
     def restore() -> None:
         headroom_logger.setLevel(level)
-        for handler in logging.getLogger().handlers:
+        loggers = [logging.getLogger(), headroom_logger] + [
+            lg
+            for name, lg in logging.Logger.manager.loggerDict.items()
+            if name.startswith("headroom.") and isinstance(lg, logging.Logger)
+        ]
+        for handler in [h for lg in loggers for h in lg.handlers]:
             for f in list(handler.filters):
                 if isinstance(f, helpers._HeadroomDebugStaysInProxyLog):
                     handler.removeFilter(f)
@@ -347,3 +352,27 @@ def test_reused_proxy_log_picks_up_debug(
     _flush(headroom_log_state)
 
     assert "debug-after-reuse" in _paths.proxy_log_path(9913).read_text()
+
+
+def test_headroom_debug_stays_out_of_child_logger_handlers(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, headroom_log_state: logging.Logger
+) -> None:
+    """A handler on a headroom.* logger (e.g. an extension's) must not receive debug lines either."""
+    import io
+
+    stream = io.StringIO()
+    child = logging.getLogger("headroom.extension_probe")
+    child_handler = logging.StreamHandler(stream)
+    child.addHandler(child_handler)
+    try:
+        monkeypatch.setenv("HEADROOM_LOG_LEVEL", "debug")
+        _setup_file_logging(port=9914)
+        child.debug("secret-tool-output")
+        child.info("info-probe")
+        _flush(headroom_log_state)
+    finally:
+        child.removeHandler(child_handler)
+
+    assert "secret-tool-output" in _paths.proxy_log_path(9914).read_text()
+    assert "secret-tool-output" not in stream.getvalue()
+    assert "info-probe" in stream.getvalue()
