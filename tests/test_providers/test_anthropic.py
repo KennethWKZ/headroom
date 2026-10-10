@@ -228,7 +228,7 @@ class TestLongContextPricing:
             anthropic_module._litellm_lacks_long_context_rate("claude-haiku-5-5", 100_000) is False
         )
 
-    def test_haiku_5_5_published_100k_rate_stays_on_litellm(self, monkeypatch):
+    def test_haiku_5_5_published_100k_rate_stays_on_litellm(self, provider, monkeypatch):
         """With its own above-100K rate published, LiteLLM keeps pricing a long Haiku prompt."""
         litellm = pytest.importorskip("litellm")
         import headroom.providers.anthropic as anthropic_module
@@ -245,10 +245,29 @@ class TestLongContextPricing:
                 "output_cost_per_token_above_100k_tokens": 2.5e-06,
             },
         )
+        # Stub the LiteLLM pricer: litellm caches model info, so a patched row
+        # does not reliably reach its own cost_per_token. The manual table
+        # would return $0.0875, so the sentinel shows which path priced it.
+        monkeypatch.setattr(anthropic_module, "estimate_cost_from_tokens", lambda *a, **k: 0.42)
 
-        assert (
-            anthropic_module._litellm_lacks_long_context_rate("claude-haiku-5-5", 150_000) is False
-        )
+        assert provider.estimate_cost(150_000, 5_000, "claude-haiku-5-5", 0) == 0.42
+
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            # 150K*$0.50 + 5K*$2.50: Haiku 5.5's long-prompt card.
+            ("anthropic.claude-haiku-5-5-v1:0", 0.0875),
+            ("us.anthropic.claude-haiku-5-5-v1:0", 0.0875),
+            ("claude-haiku-5-5-20261001", 0.0875),
+            # One version segment away is another model: the `haiku` tier
+            # default, 150K*$0.80 + 5K*$4, with no Haiku 5.5 card.
+            ("claude-haiku-5", 0.14),
+        ],
+    )
+    def test_wrapped_haiku_5_5_ids_get_the_long_prompt_card(self, manual_provider, model, expected):
+        """An id the manual table prices as Haiku 5.5 is also billed on its long-prompt card."""
+        cost = manual_provider.estimate_cost(150_000, 5_000, model, 0)
+        assert cost == pytest.approx(expected, rel=1e-4)
 
 
 class TestLiteLLMCostHelper:

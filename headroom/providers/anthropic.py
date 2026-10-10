@@ -229,7 +229,8 @@ _HAIKU_5_5_LONG_PROMPT_PREMIUM: dict[str, float] = {
     "cached_input": 5.0,
 }
 
-# (model prefixes, prompt-token threshold, per-rate multipliers above it)
+# (model ids, prompt-token threshold, per-rate multipliers above it). Ids match
+# releases and provider-wrapped forms too (`_long_context_tier`).
 _LONG_CONTEXT_TIERS: tuple[tuple[tuple[str, ...], int, dict[str, float]], ...] = (
     (_LONG_CONTEXT_TIERED_MODELS, _LONG_CONTEXT_THRESHOLD, _LONG_CONTEXT_PREMIUM),
     (("claude-haiku-5-5",), _HAIKU_5_5_LONG_PROMPT_THRESHOLD, _HAIKU_5_5_LONG_PROMPT_PREMIUM),
@@ -277,12 +278,24 @@ def _apply_long_context_premium(
     LiteLLM entry has no above-threshold rate (see
     ``_litellm_lacks_long_context_rate``).
     """
-    for prefixes, threshold, premium in _LONG_CONTEXT_TIERS:
-        if model.startswith(prefixes):
-            if input_tokens <= threshold:
-                return pricing
-            return {key: rate * premium.get(key, 1.0) for key, rate in pricing.items()}
-    return pricing
+    tier = _long_context_tier(model)
+    if tier is None or input_tokens <= tier[0]:
+        return pricing
+    _threshold, premium = tier
+    return {key: rate * premium.get(key, 1.0) for key, rate in pricing.items()}
+
+
+def _long_context_tier(model: str) -> tuple[int, dict[str, float]] | None:
+    """Return the ``(threshold, premium)`` of the long-context tier ``model`` is in.
+
+    Matches with ``_is_release_of``, as the rate lookup does, so a Bedrock id
+    such as ``us.anthropic.claude-haiku-5-5-v1:0`` that the manual table prices
+    as Haiku 5.5 also gets Haiku 5.5's long-prompt card.
+    """
+    for known_models, threshold, premium in _LONG_CONTEXT_TIERS:
+        if any(_is_release_of(model, known) for known in known_models):
+            return threshold, premium
+    return None
 
 
 def _litellm_lacks_long_context_rate(model: str, input_tokens: int) -> bool:
@@ -297,12 +310,10 @@ def _litellm_lacks_long_context_rate(model: str, input_tokens: int) -> bool:
     (``*_above_200k_tokens`` for Sonnet 4 / 4.5, ``*_above_100k_tokens`` for
     Haiku 5.5).
     """
-    tier = next((tier for tier in _LONG_CONTEXT_TIERS if model.startswith(tier[0])), None)
-    if tier is None:
+    tier = _long_context_tier(model)
+    if tier is None or input_tokens <= tier[0]:
         return False
-    _prefixes, threshold, _premium = tier
-    if input_tokens <= threshold:
-        return False
+    threshold, _premium = tier
     rate_field = f"input_cost_per_token_above_{threshold // 1000}k_tokens"
     cost_data = get_litellm_model_cost()
     for candidate in pricing_lookup_candidates(model):
