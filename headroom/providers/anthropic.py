@@ -292,16 +292,23 @@ def _litellm_lacks_long_context_rate(model: str, input_tokens: int) -> bool:
     from the bare Anthropic ids before, and pricing such a request through it then
     bills the base tier: about half the real cost of a long session. The manual
     table still carries the premium, so the caller uses it instead.
+
+    Each tier is checked against its own field, named after its threshold
+    (``*_above_200k_tokens`` for Sonnet 4 / 4.5, ``*_above_100k_tokens`` for
+    Haiku 5.5).
     """
-    if input_tokens <= _LONG_CONTEXT_THRESHOLD:
+    tier = next((tier for tier in _LONG_CONTEXT_TIERS if model.startswith(tier[0])), None)
+    if tier is None:
         return False
-    if not any(model.startswith(tiered) for tiered in _LONG_CONTEXT_TIERED_MODELS):
+    _prefixes, threshold, _premium = tier
+    if input_tokens <= threshold:
         return False
+    rate_field = f"input_cost_per_token_above_{threshold // 1000}k_tokens"
     cost_data = get_litellm_model_cost()
     for candidate in pricing_lookup_candidates(model):
         info = cost_data.get(candidate)
         if isinstance(info, dict):
-            return "input_cost_per_token_above_200k_tokens" not in info
+            return rate_field not in info
     return False  # LiteLLM doesn't know the model; it returns None and we fall back anyway
 
 
