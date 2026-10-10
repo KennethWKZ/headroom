@@ -310,24 +310,24 @@ def _litellm_lacks_long_context_rate(model: str, input_tokens: int) -> bool:
     (``*_above_200k_tokens`` for Sonnet 4 / 4.5, ``*_above_100k_tokens`` for
     Haiku 5.5).
 
-    Only bare Anthropic ids (and their releases) are checked. A wrapped row
-    without the field can be a reseller's deliberately flat rate
-    (``perplexity/anthropic/claude-haiku-5-5``), not a dropped one, and the
-    Bedrock ids LiteLLM has no row for reach the manual table anyway.
+    The row is resolved as ``estimate_cost_from_tokens`` resolves it, so a
+    gateway id such as ``anthropic/claude-haiku-5-5`` is checked against the
+    bare row it is billed from. Only Anthropic's own rows count: a reseller row
+    without the field (``perplexity/anthropic/claude-haiku-5-5``) is
+    deliberately flat-rated, not a dropped rate.
     """
-    threshold = next(
-        (threshold for ids, threshold, _premium in _LONG_CONTEXT_TIERS if model.startswith(ids)),
-        None,
-    )
-    if threshold is None or input_tokens <= threshold:
-        return False
-    rate_field = f"input_cost_per_token_above_{threshold // 1000}k_tokens"
     cost_data = get_litellm_model_cost()
-    for candidate in pricing_lookup_candidates(model):
-        info = cost_data.get(candidate)
-        if isinstance(info, dict):
-            return rate_field not in info
-    return False  # LiteLLM doesn't know the model; it returns None and we fall back anyway
+    row = next((c for c in pricing_lookup_candidates(model) if c in cost_data), None)
+    if row is None:
+        return False  # LiteLLM doesn't know the model; it returns None and we fall back anyway
+    info = cost_data[row]
+    if not isinstance(info, dict) or info.get("litellm_provider") != "anthropic":
+        return False
+    tier = _long_context_tier(row)
+    if tier is None or input_tokens <= tier[0]:
+        return False
+    threshold, _premium = tier
+    return f"input_cost_per_token_above_{threshold // 1000}k_tokens" not in info
 
 
 # Default limits for pattern-based inference
