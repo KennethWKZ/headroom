@@ -280,7 +280,6 @@ def test_forget_cycles_cannot_exceed_the_window_budget(caplog: pytest.LogCapture
         (os.__file__, "os"),
         (log_safety.__file__, "headroom.log_safety"),
     ],
-,
     ids=["forged-name", "claims-stdlib-file", "claims-headroom-module"],
 )
 def test_runtime_compiled_frames_are_not_logged(
