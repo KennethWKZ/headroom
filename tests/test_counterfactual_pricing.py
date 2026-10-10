@@ -176,16 +176,17 @@ def test_long_context_reads_a_published_one_hour_rate():
 
     from headroom.pricing.litellm_pricing import resolve_litellm_model
 
-    info = litellm.model_cost.get(resolve_litellm_model(SONNET), {})
+    model = anthropic_pricing_model("input_cost_per_token_above_200k_tokens")
+    info = litellm.model_cost.get(resolve_litellm_model(model), {})
     published = info.get("cache_creation_input_token_cost_above_1hr_above_200k_tokens")
     if not published:
         pytest.skip("catalog row publishes no combined 1h + above-200k rate")
-    rates = resolve_rates(SONNET, long_context=True)
+    rates = resolve_rates(model, long_context=True)
 
     assert rates.basis == BASIS_CATALOG
     assert rates.write_1h == pytest.approx(float(published))
     # And it is the EXPENSIVE tier, not the base one.
-    assert rates.uncached > resolve_rates(SONNET).uncached
+    assert rates.uncached > resolve_rates(model).uncached
 
 
 def test_long_context_derives_a_missing_one_hour_rate_and_says_so():
