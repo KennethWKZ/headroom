@@ -84,9 +84,10 @@ from .offline import pin_litellm_cost_map_local
 # ~microseconds. See `headroom/_ort.py` for the full story.
 ensure_ort_dylib_pinned()
 
-# Must run before any submodule imports litellm, which otherwise fetches its
-# pricing table from GitHub at import time even under HEADROOM_OFFLINE. A
-# no-op unless that switch is set. See `headroom/offline.py`.
+# Under HEADROOM_OFFLINE, litellm must not fetch its pricing table from GitHub
+# at import time. Each litellm import in this package pins that itself; this
+# call also covers a host that imports litellm after Headroom. A no-op unless
+# the switch is set. See `headroom/offline.py`.
 pin_litellm_cost_map_local()
 
 from .compress import (  # noqa: E402

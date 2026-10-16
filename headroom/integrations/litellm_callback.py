@@ -20,7 +20,7 @@ import json
 import logging
 from typing import Any
 
-from headroom.offline import guard_egress
+from headroom.offline import guard_egress, pin_litellm_cost_map_local
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ _DEFAULT_CLOUD_URL = "https://api.headroomlabs.ai"
 
 
 try:
+    pin_litellm_cost_map_local()
     from litellm.integrations.custom_logger import CustomLogger as _CustomLogger
 except ImportError:  # litellm not installed — fall back to plain object
     _CustomLogger = object  # type: ignore[assignment,misc]

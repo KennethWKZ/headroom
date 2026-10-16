@@ -99,7 +99,9 @@ def apply_offline_env() -> None:
     if is_offline():
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-    pin_litellm_cost_map_local()
+
+
+LITELLM_LOCAL_COST_MAP_ENV = "LITELLM_LOCAL_MODEL_COST_MAP"
 
 
 def pin_litellm_cost_map_local() -> None:
@@ -107,16 +109,24 @@ def pin_litellm_cost_map_local() -> None:
 
     ``import litellm`` fetches ``model_prices_and_context_window.json`` from
     raw.githubusercontent.com at import time (three attempts) unless
-    ``LITELLM_LOCAL_MODEL_COST_MAP`` is true. That is not a client Headroom
+    ``LITELLM_LOCAL_MODEL_COST_MAP`` is ``true``. That is not a client Headroom
     builds, so no ``guard_egress`` site can dominate it; the only lever is the
-    env var, and it has to be set before the first ``import litellm``. That is
-    why this runs from ``headroom/__init__.py`` and again next to the import in
-    ``headroom/pricing/litellm_pricing.py`` (the switch can be turned on after
-    the package is imported). ``setdefault`` lets an explicit operator value
-    win, as with the HuggingFace switches above.
+    env var, read once during that import. So every ``import litellm`` in
+    ``headroom/`` calls this first, in the same scope, because the switch is
+    read when it is checked rather than when the package loads
+    (``create_app(ProxyConfig(offline=True))`` turns it on after import). The
+    chokepoint meta-test fails the build for an import that does not.
+    ``headroom/__init__.py`` also calls it, which covers a host process that
+    imports litellm itself after importing Headroom; a host that imports
+    litellm *before* Headroom has made that fetch already and must set the
+    variable itself.
+
+    Overwritten rather than ``setdefault``: litellm accepts only ``true``
+    (any case), so an operator ``1``, ``False`` or empty value would reopen a
+    connection the air-gap switch exists to refuse.
     """
     if is_offline():
-        os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+        os.environ[LITELLM_LOCAL_COST_MAP_ENV] = "True"
 
 
 class OfflineEgressBlocked(BaseException):

@@ -191,6 +191,11 @@ class TestSocketTrap:
 @pytest.fixture
 def offline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HEADROOM_OFFLINE", "1")
+    # An import of litellm under the switch writes LITELLM_LOCAL_MODEL_COST_MAP
+    # directly, out of monkeypatch's sight. Record the variable (setenv saves
+    # the original, delenv then clears it) so teardown puts it back.
+    monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "")
+    monkeypatch.delenv("LITELLM_LOCAL_MODEL_COST_MAP")
 
 
 # ``"example.com" in url`` is true of ``https://example.com.attacker.test``
@@ -449,6 +454,31 @@ print(json.dumps({"attempts": attempts, "litellm": "litellm" in sys.modules}))
 """
 
 
+def _is_pin_call(statement: ast.stmt) -> bool:
+    if not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)):
+        return False
+    func = statement.value.func
+    name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+    return name == "pin_litellm_cost_map_local"
+
+
+def _pinned_before(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
+    """True when a pin call precedes ``node`` in its own block or an enclosing
+    block of the same function/module — i.e. it always runs first."""
+    child = node
+    while child in parents:
+        parent = parents[child]
+        for field in ("body", "orelse", "finalbody", "handlers"):
+            block = getattr(parent, field, None)
+            if isinstance(block, list) and child in block:
+                if any(_is_pin_call(s) for s in block[: block.index(child)]):
+                    return True
+        if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return False
+        child = parent
+    return False
+
+
 class TestLiteLLMCostMapOffline:
     """``import litellm`` refreshes its pricing table from
     raw.githubusercontent.com unless ``LITELLM_LOCAL_MODEL_COST_MAP`` is set,
@@ -457,7 +487,7 @@ class TestLiteLLMCostMapOffline:
     """
 
     @staticmethod
-    def _probe(when: str, module: str) -> dict[str, object]:
+    def _probe(when: str, module: str, cost_map_env: str | None = None) -> dict[str, object]:
         import json
         import subprocess
         import sys
@@ -467,6 +497,8 @@ class TestLiteLLMCostMapOffline:
         env.pop("HEADROOM_OFFLINE", None)
         if when == "early":
             env["HEADROOM_OFFLINE"] = "1"
+        if cost_map_env is not None:
+            env["LITELLM_LOCAL_MODEL_COST_MAP"] = cost_map_env
         result = subprocess.run(
             [sys.executable, "-c", _LITELLM_IMPORT_PROBE, when, module],
             capture_output=True,
@@ -479,30 +511,64 @@ class TestLiteLLMCostMapOffline:
         assert result.returncode == 0, result.stderr[-2000:]
         return json.loads(result.stdout.strip().splitlines()[-1])
 
-    @pytest.mark.parametrize(
-        "module",
-        ["headroom.providers.litellm", "headroom.integrations.litellm_callback"],
-    )
+    _LITELLM_MODULES = [
+        "headroom.providers.litellm",
+        "headroom.backends.litellm",
+        "headroom.pricing.litellm_pricing",
+        "headroom.integrations.litellm_callback",
+    ]
+
+    @pytest.mark.parametrize("module", _LITELLM_MODULES)
     def test_import_with_offline_set_at_start_opens_no_socket(self, module: str) -> None:
         outcome = self._probe("early", module)
         assert outcome["litellm"] is True
         assert outcome["attempts"] == []
 
-    def test_import_with_offline_set_after_package_load_opens_no_socket(self) -> None:
-        """The switch can be flipped after ``import headroom`` (the proxy's
-        ``--offline`` flag does exactly that), so the package-level pin is not
-        enough on its own: the pricing module pins again before its import."""
-        outcome = self._probe("late", "headroom.pricing.litellm_pricing")
+    @pytest.mark.parametrize("module", _LITELLM_MODULES)
+    def test_import_with_offline_set_after_package_load_opens_no_socket(self, module: str) -> None:
+        """The switch is read when it is checked, not when the package loads:
+        ``create_app(ProxyConfig(offline=True))`` turns it on after
+        ``import headroom``. So a pin in ``headroom/__init__.py`` is not enough
+        on its own; each litellm import pins again first."""
+        outcome = self._probe("late", module)
         assert outcome["litellm"] is True
         assert outcome["attempts"] == []
 
-    def test_explicit_operator_value_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from headroom.offline import pin_litellm_cost_map_local
+    @pytest.mark.parametrize("operator_value", ["1", "False", ""])
+    def test_operator_value_cannot_reopen_the_fetch(self, operator_value: str) -> None:
+        """litellm accepts only ``true``, so an operator ``1`` (the form every
+        Headroom switch accepts), ``False`` or empty value would make it fetch.
+        The air-gap switch wins over it."""
+        outcome = self._probe("early", "headroom.providers.litellm", operator_value)
+        assert outcome["litellm"] is True
+        assert outcome["attempts"] == []
 
-        monkeypatch.setenv("HEADROOM_OFFLINE", "1")
-        monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "False")
-        pin_litellm_cost_map_local()
-        assert os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] == "False"
+    def test_every_litellm_import_is_pinned_first(self) -> None:
+        """Each ``import litellm`` / ``from litellm…`` in ``headroom/`` must
+        follow a ``pin_litellm_cost_map_local()`` call in the same function (or
+        at module level for a module-level import). A pin in another scope does
+        not count: it ran at a different time from the import."""
+        unpinned: list[str] = []
+        for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            parents = {
+                child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
+            }
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    names = [node.module]
+                else:
+                    continue
+                if not any(n == "litellm" or n.startswith("litellm.") for n in names):
+                    continue
+                if not _pinned_before(node, parents):
+                    unpinned.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}")
+        assert unpinned == [], (
+            "litellm imported without pin_litellm_cost_map_local() first in the same "
+            f"scope; under HEADROOM_OFFLINE it fetches its pricing table: {unpinned}"
+        )
 
     def test_online_leaves_litellm_alone(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from headroom.offline import pin_litellm_cost_map_local

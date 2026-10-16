@@ -37,8 +37,7 @@ from headroom.pricing.litellm_model_resolution import (
 # don't re-run the dotenv side effect.
 #
 # Under HEADROOM_OFFLINE, litellm must also stay on its bundled pricing table
-# rather than fetch one from GitHub during that import. `headroom/__init__.py`
-# already did this, but only if the switch was set before the package loaded.
+# rather than fetch one from GitHub during that import.
 pin_litellm_cost_map_local()
 
 try:
