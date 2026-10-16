@@ -8,8 +8,8 @@ deployment exists to carry.
 Refused (this is not a sample — it is the rule, and the meta-test enforces it):
 the telemetry beacon, the update check, the license/usage reporter, OTLP and
 Langfuse export, HuggingFace/Kompress/fastembed model downloads, release-binary
-downloads (codebase-memory-mcp among them), eval dataset downloads and the provider SDK
-clients the eval harness drives, GitHub Copilot device-flow auth and token
+downloads (codebase-memory-mcp among them), litellm's import-time pricing-table
+refresh, eval dataset downloads and the provider SDK clients the eval harness drives, GitHub Copilot device-flow auth and token
 exchange, the Anthropic / Codex / Copilot subscription pollers, the OpenAI
 embedders, both Headroom Cloud compression integrations, and the TLS
 diagnostics (``doctor --network`` endpoint checks and the certificate-chain
@@ -99,6 +99,24 @@ def apply_offline_env() -> None:
     if is_offline():
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    pin_litellm_cost_map_local()
+
+
+def pin_litellm_cost_map_local() -> None:
+    """Keep litellm on its bundled pricing table under ``HEADROOM_OFFLINE``.
+
+    ``import litellm`` fetches ``model_prices_and_context_window.json`` from
+    raw.githubusercontent.com at import time (three attempts) unless
+    ``LITELLM_LOCAL_MODEL_COST_MAP`` is true. That is not a client Headroom
+    builds, so no ``guard_egress`` site can dominate it; the only lever is the
+    env var, and it has to be set before the first ``import litellm``. That is
+    why this runs from ``headroom/__init__.py`` and again next to the import in
+    ``headroom/pricing/litellm_pricing.py`` (the switch can be turned on after
+    the package is imported). ``setdefault`` lets an explicit operator value
+    win, as with the HuggingFace switches above.
+    """
+    if is_offline():
+        os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 
 class OfflineEgressBlocked(BaseException):
