@@ -196,6 +196,11 @@ def offline(monkeypatch: pytest.MonkeyPatch) -> None:
     # the original, delenv then clears it) so teardown puts it back.
     monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "")
     monkeypatch.delenv("LITELLM_LOCAL_MODEL_COST_MAP")
+    # ...and the pin's memory of the value it replaced, which would otherwise
+    # outlive the variable it describes.
+    import headroom.offline
+
+    monkeypatch.setattr(headroom.offline, "_cost_map_before_pin", None)
 
 
 # ``"example.com" in url`` is true of ``https://example.com.attacker.test``
@@ -570,13 +575,58 @@ class TestLiteLLMCostMapOffline:
             f"scope; under HEADROOM_OFFLINE it fetches its pricing table: {unpinned}"
         )
 
+    @staticmethod
+    def _fresh_pin_state(monkeypatch: pytest.MonkeyPatch, value: str | None) -> None:
+        import headroom.offline
+
+        monkeypatch.setattr(headroom.offline, "_cost_map_before_pin", None)
+        # setenv first so teardown restores the real value even after the
+        # pin writes the variable behind monkeypatch's back.
+        monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "")
+        if value is None:
+            monkeypatch.delenv("LITELLM_LOCAL_MODEL_COST_MAP")
+        else:
+            monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", value)
+
     def test_online_leaves_litellm_alone(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from headroom.offline import pin_litellm_cost_map_local
 
+        self._fresh_pin_state(monkeypatch, None)
         monkeypatch.delenv("HEADROOM_OFFLINE", raising=False)
-        monkeypatch.delenv("LITELLM_LOCAL_MODEL_COST_MAP", raising=False)
         pin_litellm_cost_map_local()
         assert "LITELLM_LOCAL_MODEL_COST_MAP" not in os.environ
+
+    @pytest.mark.parametrize("before", [None, "False"])
+    def test_leaving_offline_puts_back_what_the_pin_replaced(
+        self, monkeypatch: pytest.MonkeyPatch, before: str | None
+    ) -> None:
+        """Offline turned off before the first litellm import must give the
+        online pricing refresh back, not leave Headroom's pin behind."""
+        from headroom.offline import pin_litellm_cost_map_local
+
+        self._fresh_pin_state(monkeypatch, before)
+        monkeypatch.setenv("HEADROOM_OFFLINE", "1")
+        pin_litellm_cost_map_local()
+        pin_litellm_cost_map_local()  # a second pin must not record its own value
+        assert os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] == "True"
+
+        monkeypatch.delenv("HEADROOM_OFFLINE")
+        pin_litellm_cost_map_local()
+        assert os.environ.get("LITELLM_LOCAL_MODEL_COST_MAP") == before
+
+    def test_a_value_changed_after_the_pin_is_not_overwritten(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from headroom.offline import pin_litellm_cost_map_local
+
+        self._fresh_pin_state(monkeypatch, None)
+        monkeypatch.setenv("HEADROOM_OFFLINE", "1")
+        pin_litellm_cost_map_local()
+        os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "false"  # the operator's own change
+
+        monkeypatch.delenv("HEADROOM_OFFLINE")
+        pin_litellm_cost_map_local()
+        assert os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] == "false"
 
 
 # ────────── path 4: the Python half of the HuggingFace download ─────────────

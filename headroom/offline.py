@@ -102,6 +102,12 @@ def apply_offline_env() -> None:
 
 
 LITELLM_LOCAL_COST_MAP_ENV = "LITELLM_LOCAL_MODEL_COST_MAP"
+_PINNED_COST_MAP_VALUE = "True"
+
+# What LITELLM_LOCAL_MODEL_COST_MAP held before Headroom pinned it: unset when
+# Headroom has no pin in place, otherwise a 1-tuple of the prior value (None
+# when the variable was absent).
+_cost_map_before_pin: tuple[str | None] | None = None
 
 
 def pin_litellm_cost_map_local() -> None:
@@ -124,9 +130,26 @@ def pin_litellm_cost_map_local() -> None:
     Overwritten rather than ``setdefault``: litellm accepts only ``true``
     (any case), so an operator ``1``, ``False`` or empty value would reopen a
     connection the air-gap switch exists to refuse.
+
+    The pin is Headroom's, so it is also undone: called with the switch off,
+    this puts back the value it replaced, provided the variable still holds
+    the pin. A process that leaves offline mode before its first litellm
+    import then gets the online pricing refresh again, and an operator's own
+    value is never touched outside offline mode.
     """
+    global _cost_map_before_pin
     if is_offline():
-        os.environ[LITELLM_LOCAL_COST_MAP_ENV] = "True"
+        if _cost_map_before_pin is None:
+            _cost_map_before_pin = (os.environ.get(LITELLM_LOCAL_COST_MAP_ENV),)
+        os.environ[LITELLM_LOCAL_COST_MAP_ENV] = _PINNED_COST_MAP_VALUE
+    elif _cost_map_before_pin is not None:
+        (before,) = _cost_map_before_pin
+        _cost_map_before_pin = None
+        if os.environ.get(LITELLM_LOCAL_COST_MAP_ENV) == _PINNED_COST_MAP_VALUE:
+            if before is None:
+                os.environ.pop(LITELLM_LOCAL_COST_MAP_ENV, None)
+            else:
+                os.environ[LITELLM_LOCAL_COST_MAP_ENV] = before
 
 
 class OfflineEgressBlocked(BaseException):
