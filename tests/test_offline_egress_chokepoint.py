@@ -415,6 +415,104 @@ class TestLangfuseExporterOffline:
         assert configure_langfuse_tracing(LangfuseTracingConfig(enabled=False)) is not None
 
 
+# ────────────── path 2c: litellm's import-time pricing fetch ────────────────
+
+# Runs in a fresh interpreter: the fetch happens once, on the first
+# ``import litellm``, and inside this pytest process an earlier test has
+# usually imported it already, which is how the leak hid behind test order.
+_LITELLM_IMPORT_PROBE = """
+import json, os, socket, sys
+
+attempts = []
+
+def _trap(address):
+    host = address[0] if isinstance(address, tuple) else address
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        attempts.append(str(host))
+        raise OSError("outbound connection attempted while offline")
+
+_create_connection = socket.create_connection
+_connect = socket.socket.connect
+socket.create_connection = lambda address, *a, **k: (
+    _trap(address) or _create_connection(address, *a, **k)
+)
+socket.socket.connect = lambda self, address: _trap(address) or _connect(self, address)
+
+import headroom
+
+if sys.argv[1] == "late":
+    os.environ["HEADROOM_OFFLINE"] = "1"
+import importlib
+
+importlib.import_module(sys.argv[2])
+print(json.dumps({"attempts": attempts, "litellm": "litellm" in sys.modules}))
+"""
+
+
+class TestLiteLLMCostMapOffline:
+    """``import litellm`` refreshes its pricing table from
+    raw.githubusercontent.com unless ``LITELLM_LOCAL_MODEL_COST_MAP`` is set,
+    and every litellm-backed module (the pricing helpers, the LiteLLM provider
+    and backend, both Headroom Cloud integrations) triggers it on first import.
+    """
+
+    @staticmethod
+    def _probe(when: str, module: str) -> dict[str, object]:
+        import json
+        import subprocess
+        import sys
+
+        pytest.importorskip("litellm")
+        env = {k: v for k, v in os.environ.items() if not k.startswith("LITELLM_")}
+        env.pop("HEADROOM_OFFLINE", None)
+        if when == "early":
+            env["HEADROOM_OFFLINE"] = "1"
+        result = subprocess.run(
+            [sys.executable, "-c", _LITELLM_IMPORT_PROBE, when, module],
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            env=env,
+            timeout=120,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr[-2000:]
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
+    @pytest.mark.parametrize(
+        "module",
+        ["headroom.providers.litellm", "headroom.integrations.litellm_callback"],
+    )
+    def test_import_with_offline_set_at_start_opens_no_socket(self, module: str) -> None:
+        outcome = self._probe("early", module)
+        assert outcome["litellm"] is True
+        assert outcome["attempts"] == []
+
+    def test_import_with_offline_set_after_package_load_opens_no_socket(self) -> None:
+        """The switch can be flipped after ``import headroom`` (the proxy's
+        ``--offline`` flag does exactly that), so the package-level pin is not
+        enough on its own: the pricing module pins again before its import."""
+        outcome = self._probe("late", "headroom.pricing.litellm_pricing")
+        assert outcome["litellm"] is True
+        assert outcome["attempts"] == []
+
+    def test_explicit_operator_value_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from headroom.offline import pin_litellm_cost_map_local
+
+        monkeypatch.setenv("HEADROOM_OFFLINE", "1")
+        monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "False")
+        pin_litellm_cost_map_local()
+        assert os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] == "False"
+
+    def test_online_leaves_litellm_alone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from headroom.offline import pin_litellm_cost_map_local
+
+        monkeypatch.delenv("HEADROOM_OFFLINE", raising=False)
+        monkeypatch.delenv("LITELLM_LOCAL_MODEL_COST_MAP", raising=False)
+        pin_litellm_cost_map_local()
+        assert "LITELLM_LOCAL_MODEL_COST_MAP" not in os.environ
+
+
 # ────────── path 4: the Python half of the HuggingFace download ─────────────
 
 

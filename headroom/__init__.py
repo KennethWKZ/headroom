@@ -75,6 +75,7 @@ from typing import Any
 
 from ._ort import ensure_ort_dylib_pinned
 from ._version import __version__  # noqa: F401
+from .offline import pin_litellm_cost_map_local
 
 # Must run before anything can import `headroom._core`: on Windows the
 # Rust core resolves onnxruntime.dll at runtime (ort load-dynamic), and
@@ -82,6 +83,11 @@ from ._version import __version__  # noqa: F401
 # deadlocks ort session init (Win11 24H2+). Windows-gated, idempotent,
 # ~microseconds. See `headroom/_ort.py` for the full story.
 ensure_ort_dylib_pinned()
+
+# Must run before any submodule imports litellm, which otherwise fetches its
+# pricing table from GitHub at import time even under HEADROOM_OFFLINE. A
+# no-op unless that switch is set. See `headroom/offline.py`.
+pin_litellm_cost_map_local()
 
 from .compress import (  # noqa: E402
     CompressConfig,

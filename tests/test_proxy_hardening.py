@@ -813,12 +813,14 @@ class TestOfflineSwitch:
     def test_apply_offline_env_sets_hf_offline(self, monkeypatch):
         monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
         monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
+        monkeypatch.delenv("LITELLM_LOCAL_MODEL_COST_MAP", raising=False)
         monkeypatch.setenv("HEADROOM_OFFLINE", "1")
         apply_offline_env()
         import os
 
         assert os.environ.get("HF_HUB_OFFLINE") == "1"
         assert os.environ.get("TRANSFORMERS_OFFLINE") == "1"
+        assert os.environ.get("LITELLM_LOCAL_MODEL_COST_MAP") == "True"
 
 
 # ─────────────────── missing peer address fails closed everywhere ───────────
