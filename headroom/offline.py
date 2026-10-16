@@ -9,7 +9,8 @@ Refused (this is not a sample — it is the rule, and the meta-test enforces it)
 the telemetry beacon, the update check, the license/usage reporter, OTLP and
 Langfuse export, HuggingFace/Kompress/fastembed model downloads, release-binary
 downloads (codebase-memory-mcp among them), litellm's import-time pricing-table
-refresh, eval dataset downloads and the provider SDK clients the eval harness drives, GitHub Copilot device-flow auth and token
+refresh, CrewAI's import-time install tracking, eval dataset downloads and the
+provider SDK clients the eval harness drives, GitHub Copilot device-flow auth and token
 exchange, the Anthropic / Codex / Copilot subscription pollers, the OpenAI
 embedders, both Headroom Cloud compression integrations, and the TLS
 diagnostics (``doctor --network`` endpoint checks and the certificate-chain
@@ -101,13 +102,46 @@ def apply_offline_env() -> None:
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 
-LITELLM_LOCAL_COST_MAP_ENV = "LITELLM_LOCAL_MODEL_COST_MAP"
-_PINNED_COST_MAP_VALUE = "True"
+class _OfflineEnvPin:
+    """An environment variable Headroom forces while ``HEADROOM_OFFLINE`` is
+    on, for a third-party library that dials out during its own import and
+    only listens to that variable.
 
-# What LITELLM_LOCAL_MODEL_COST_MAP held before Headroom pinned it: unset when
-# Headroom has no pin in place, otherwise a 1-tuple of the prior value (None
-# when the variable was absent).
-_cost_map_before_pin: tuple[str | None] | None = None
+    Overwritten rather than ``setdefault``: these libraries accept only
+    ``true``, so an operator ``1``, ``False`` or empty value would reopen a
+    connection the air-gap switch exists to refuse. The pin is Headroom's, so
+    it is also undone: called with the switch off, it puts back the value it
+    replaced, provided the variable still holds the pin. An operator's own
+    value is never touched outside offline mode.
+    """
+
+    def __init__(self, name: str, value: str) -> None:
+        self.name = name
+        self.value = value
+        # Unset while no pin is in place; otherwise a 1-tuple of the value the
+        # pin replaced (None when the variable was absent).
+        self.before: tuple[str | None] | None = None
+
+    def __call__(self) -> None:
+        if is_offline():
+            if self.before is None:
+                self.before = (os.environ.get(self.name),)
+            os.environ[self.name] = self.value
+        elif self.before is not None:
+            (before,) = self.before
+            self.before = None
+            if os.environ.get(self.name) == self.value:
+                if before is None:
+                    os.environ.pop(self.name, None)
+                else:
+                    os.environ[self.name] = before
+
+
+LITELLM_LOCAL_COST_MAP_ENV = "LITELLM_LOCAL_MODEL_COST_MAP"
+_litellm_cost_map_pin = _OfflineEnvPin(LITELLM_LOCAL_COST_MAP_ENV, "True")
+
+CREWAI_TELEMETRY_ENV = "CREWAI_DISABLE_TELEMETRY"
+_crewai_telemetry_pin = _OfflineEnvPin(CREWAI_TELEMETRY_ENV, "true")
 
 
 def pin_litellm_cost_map_local() -> None:
@@ -127,29 +161,26 @@ def pin_litellm_cost_map_local() -> None:
     litellm *before* Headroom has made that fetch already and must set the
     variable itself.
 
-    Overwritten rather than ``setdefault``: litellm accepts only ``true``
-    (any case), so an operator ``1``, ``False`` or empty value would reopen a
-    connection the air-gap switch exists to refuse.
-
-    The pin is Headroom's, so it is also undone: called with the switch off,
-    this puts back the value it replaced, provided the variable still holds
-    the pin. A process that leaves offline mode before its first litellm
-    import then gets the online pricing refresh again, and an operator's own
-    value is never touched outside offline mode.
+    Forced and given back as described on :class:`_OfflineEnvPin`, so a
+    process that leaves offline mode before its first litellm import gets the
+    online pricing refresh again.
     """
-    global _cost_map_before_pin
-    if is_offline():
-        if _cost_map_before_pin is None:
-            _cost_map_before_pin = (os.environ.get(LITELLM_LOCAL_COST_MAP_ENV),)
-        os.environ[LITELLM_LOCAL_COST_MAP_ENV] = _PINNED_COST_MAP_VALUE
-    elif _cost_map_before_pin is not None:
-        (before,) = _cost_map_before_pin
-        _cost_map_before_pin = None
-        if os.environ.get(LITELLM_LOCAL_COST_MAP_ENV) == _PINNED_COST_MAP_VALUE:
-            if before is None:
-                os.environ.pop(LITELLM_LOCAL_COST_MAP_ENV, None)
-            else:
-                os.environ[LITELLM_LOCAL_COST_MAP_ENV] = before
+    _litellm_cost_map_pin()
+
+
+def pin_crewai_telemetry_off() -> None:
+    """Keep CrewAI's install tracking quiet under ``HEADROOM_OFFLINE``.
+
+    ``import crewai`` starts a thread that requests a Scarf pixel from
+    api.scarf.sh unless ``CREWAI_DISABLE_TELEMETRY`` (or ``OTEL_SDK_DISABLED``
+    / ``CREWAI_DISABLE_TRACKING``) is ``true``. Headroom imports CrewAI
+    whenever it is installed, through ``headroom.integrations``, so even a
+    LiteLLM callback import under the air-gap switch dialled out. As with
+    litellm, the variable is the only lever, so every ``crewai`` import in
+    ``headroom/`` calls this first (the chokepoint meta-test enforces it), and
+    it is forced and given back as described on :class:`_OfflineEnvPin`.
+    """
+    _crewai_telemetry_pin()
 
 
 class OfflineEgressBlocked(BaseException):
