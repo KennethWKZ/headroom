@@ -365,19 +365,6 @@ def _litellm() -> Any | None:
 _RATE_CACHE_MAXSIZE = 256
 
 
-def _catalog_row(model: str) -> dict[str, Any] | None:
-    """``model``'s LiteLLM catalog row, ``{}`` when unlisted, ``None`` without LiteLLM."""
-    litellm = _litellm()
-    if litellm is None:
-        return None
-    try:
-        from headroom.pricing.litellm_pricing import resolve_litellm_model
-
-        return litellm.model_cost.get(resolve_litellm_model(model), {}) or {}
-    except Exception:
-        return None
-
-
 def long_context_tier(info: dict[str, Any]) -> tuple[int, str] | None:
     """The row's long-context tier as ``(threshold_tokens, field_suffix)``, if any."""
     for key in info:
@@ -401,7 +388,8 @@ def long_context_threshold(model: str) -> int:
     Memoized on the same bounded LRU as :func:`resolve_rates`, for the same
     reason; tests that swap the catalog clear both.
     """
-    tier = long_context_tier(_catalog_row(model) or {})
+    row = _catalog_row(model)
+    tier = long_context_tier(row[2]) if row is not None else None
     return tier[0] if tier else LONG_CONTEXT_THRESHOLD_TOKENS
 
 
@@ -421,6 +409,26 @@ def _canonical_cache_rate(litellm: Any, model: str, field: str, *, long_context:
     except Exception:
         return 0.0
     return rate if math.isfinite(rate) and rate >= 0 else 0.0
+
+
+def _catalog_row(model: str) -> tuple[Any, str, dict[str, Any]] | None:
+    """``(litellm, resolved model, catalog row)``, or ``None``. Never raises."""
+    litellm = _litellm()
+    if litellm is None:
+        return None
+    try:
+        from headroom.pricing.litellm_pricing import resolve_litellm_model
+
+        resolved_model = resolve_litellm_model(model)
+        info = litellm.model_cost.get(resolved_model, {}) or {}
+    except Exception as exc:
+        logger.debug(
+            "counterfactual: LiteLLM catalog lookup failed for %s: %s",
+            safe_id(model),
+            describe_exception(exc),
+        )
+        return None
+    return litellm, resolved_model, info
 
 
 @lru_cache(maxsize=_RATE_CACHE_MAXSIZE)
@@ -463,22 +471,10 @@ def resolve_rates(
     catalog between cases must call ``resolve_rates.cache_clear()`` in between,
     or the previous case's rates leak into the next.
     """
-    litellm = _litellm()
-    if litellm is None:
+    row = _catalog_row(model)
+    if row is None:
         return None
-
-    try:
-        from headroom.pricing.litellm_pricing import resolve_litellm_model
-
-        resolved_model = resolve_litellm_model(model)
-        info = litellm.model_cost.get(resolved_model, {}) or {}
-    except Exception as exc:
-        logger.debug(
-            "counterfactual: LiteLLM catalog lookup failed for %s: %s",
-            safe_id(model),
-            describe_exception(exc),
-        )
-        return None
+    litellm, resolved_model, info = row
 
     base = info.get("input_cost_per_token")
     # `is None` distinguishes "unknown model" from "genuinely free". `not base`
@@ -628,7 +624,8 @@ def long_context_premium_avoided_usd(
     output_premium = 0.0
     if max(_coerce_int(output_tokens), 0):
         try:
-            info = _catalog_row(model) or {}
+            row = _catalog_row(model)
+            info = row[2] if row is not None else {}
             tier = long_context_tier(info)
             base_output = info.get("output_cost_per_token")
             long_output = info.get(f"output_cost_per_token{tier[1]}") if tier else None
@@ -639,6 +636,19 @@ def long_context_premium_avoided_usd(
         except Exception:  # Pricing metadata must not break telemetry.
             pass
     return input_premium + output_premium
+
+
+def catalog_min_cacheable_tokens(model: str) -> int | None:
+    """The catalog's smallest prompt the provider will cache for ``model``.
+
+    LiteLLM publishes it as ``prompt_cache_min_tokens`` (Anthropic: 1024 for
+    Sonnet, 4096 for Haiku 4.5). ``None`` when litellm or the row lacks it.
+    """
+    row = _catalog_row(model)
+    value = row[2].get("prompt_cache_min_tokens") if row is not None else None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return int(value) if math.isfinite(value) and value > 0 else None
 
 
 @dataclass(frozen=True)
@@ -757,6 +767,7 @@ __all__ = [
     "long_context_premium_avoided_usd",
     "long_context_threshold",
     "long_context_tier",
+    "catalog_min_cacheable_tokens",
     "price_savings",
     "resolve_rates",
     "split_tokens",
